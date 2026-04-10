@@ -395,7 +395,7 @@ Without them, only structural errors can be caught at compile time.
 A validation pass runs after compilation but before any task starts, checking
 preconditions: e.g. partition exists, upstream table has landed, SLA window is open.
 If any precondition fails, the pipeline never starts and dependents are notified.
-Users declare preconditions explicitly; tinydag does not infer them.
+Users declare preconditions explicitly and tinydag does not infer them.
 Inference would require tinydag to understand the semantics of your data
 stores and inputs, which is domain knowledge that belongs to the user, 
 or another tool.
