@@ -1,8 +1,8 @@
 # tinydag
 
-An embedded-first, Rust-native DAG orchestrator. Runs *inside* a larger system rather than *being* the system. Owns the graph, the ordering, the state, and the dispatch, but not the compute.
+A tiny DAG orchestrator written in Rust.
 
-Most pipeline tools (Airflow, Dagster, Prefect) assume they are the center of your infrastructure. tinydag does not.
+Runs *inside* a larger system rather than *being* the system. Owns the graph, the ordering, the state, and the dispatch, but not the compute. Most pipeline tools (Airflow, Dagster, Prefect) assume they are the center of your infrastructure. tinydag does not.
 
 ---
 
@@ -37,7 +37,7 @@ with pipeline:
 
 - *Compile time:* cycles, broken dependencies, contract mismatches, missing task references
 - *Pre-execution:* data availability, SLA windows, user-declared preconditions
-- *Early execution:* logic errors and external failures that are unavoidable — but surfaced fast and clearly
+- *Early execution:* logic errors and external failures that are unavoidable but are surfaced early and clearly
 
 **Static DAGs over dynamic ones.** Almost every dynamic DAG is convertible to a static one. Parameterized pipelines, fan-out, and conditional branching all have static solutions. For the rest, there is an explicit `unsafe` mode.
 
