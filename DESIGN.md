@@ -12,6 +12,39 @@ RFC process.
 
 ---
 
+## Table of Contents
+
+- [Positioning](#positioning)
+- [Pipeline Lifecycle](#pipeline-lifecycle)
+  - [Deployment lifecycle](#deployment-lifecycle)
+  - [Execution lifecycle](#execution-lifecycle)
+- [Core Design Decisions](#core-design-decisions)
+  - [Fail Fast at Every Layer](#fail-fast-at-every-layer)
+  - [Task Definition Language](#task-definition-language)
+  - [Task Module Validation](#task-module-validation)
+  - [Testing](#testing)
+  - [Task Interface](#task-interface)
+  - [IR Structure](#ir-structure)
+  - [Static vs. Dynamic DAGs](#static-vs-dynamic-dags)
+  - [Late-binding Inputs](#late-binding-inputs)
+  - [Compile time checks](#compile-time-checks)
+  - [Pre-execution](#pre-execution)
+  - [Early execution](#early-execution)
+  - [Inter-pipeline dependencies](#inter-pipeline-dependencies)
+- [Architecture](#architecture)
+  - [Execution Model](#execution-model)
+  - [Scheduler](#scheduler)
+  - [Observability](#observability)
+  - [Multi-tenancy](#multi-tenancy)
+  - [Security Model](#security-model)
+- [Airflow Interoperability](#airflow-interoperability)
+- [v1 Scope](#v1-scope)
+- [Backfills](#backfills)
+- [Testing Strategy](#testing-strategy)
+- [Contributing](#contributing)
+
+---
+
 ## Positioning
 
 There is no tool that is: embedded-first, Rust-native, dependency-light,
@@ -34,6 +67,23 @@ tinydag fills that gap.
 ## Pipeline Lifecycle
 
 ### Deployment lifecycle
+
+> **Note:** This section is a placeholder and will be expanded later.
+
+tinydag uses CI/CD as the gate for pipeline registration. A pipeline goes
+live when it passes CI, not when it is first scheduled to run.
+
+The typical flow:
+
+1. User lands a diff containing a new or changed Starlark file
+2. CI compiles the pipeline: `tinydag compile pipeline.star`
+3. CI runs pipeline-level tests: `pytest test_pipeline.py`
+4. On success, CI registers the compiled IR with the scheduler:
+   `tinydag register pipeline.star`
+5. The scheduler picks up the new version; the next trigger runs it
+
+If compilation or tests fail, the pipeline never reaches the scheduler.
+
 ```mermaid
 flowchart TD
     A([Write Starlark + task modules]):::author
@@ -66,25 +116,6 @@ flowchart TD
     classDef fail fill:#FCEBEB,stroke:#A32D2D,color:#791F1F
     classDef success fill:#EAF3DE,stroke:#3B6D11,color:#27500A
 ```
-
-### Pipeline Deployment
-
-> **Note:** This section is a placeholder and will be expanded later.
-
-tinydag uses CI/CD as the gate for pipeline registration. A pipeline goes
-live when it passes CI, not when it is first scheduled to run.
-
-The typical flow:
-
-1. User lands a diff containing a new or changed Starlark file
-2. CI compiles the pipeline: `tinydag compile pipeline.star`
-3. CI runs pipeline-level tests: `pytest test_pipeline.py`
-4. On success, CI registers the compiled IR with the scheduler:
-   `tinydag register pipeline.star`
-5. The scheduler picks up the new version; the next trigger runs it
-
-If compilation or tests fail, the pipeline never reaches the scheduler.
-
 ## Core Design Decisions
 
 ### Fail Fast at Every Layer
