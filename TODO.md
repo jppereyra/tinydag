@@ -19,9 +19,9 @@
 - [x] Cycle detection (Kahn's algorithm)
 - [x] Topological sort
 - [ ] Contract checking — output type of node A matches declared input type of node B
-- [ ] Missing task reference checks — callable/script/container exists and is reachable
+- [x] Missing task reference checks — callable/script/container exists and is reachable (structural: non-empty fields, valid dotted identifier for Python callables; import-level check is Python-side)
 - [ ] Parameter validation — required params present and correct type
-- [ ] Disconnected node detection (nodes with no edges in a multi-node DAG)
+- [x] Disconnected node detection (nodes with no edges in a multi-node DAG)
 - [ ] Python DSL scope violation checks — imports, side effects, system calls (Starlark-style)
 
 ## Pre-execution validation (v1)
