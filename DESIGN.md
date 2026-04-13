@@ -302,8 +302,13 @@ logic is the user's responsibility.
 Fields:
 
 - Node ID
-- Task reference (pointer to what runs: Python callable, script path, container image)
-- Dependencies (edges)
+- Task reference: a tagged union where the operator type determines valid fields
+  - `python`: callable reference, inputs, outputs
+  - `bash`: command string
+  - `sql`: connection reference, query
+  - `s3`: source, destination
+  - `http`: url, method, headers, body
+  - `kubernetes`: image, command, resources
 - Inputs / outputs (names + types)
 - Execution metadata (retries, timeout, etc.)
 - Trigger definition

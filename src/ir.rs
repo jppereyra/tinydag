@@ -11,25 +11,81 @@ use sha2::{Digest, Sha256};
 /// A unique identifier for a node within a DAG.
 pub type NodeId = String;
 
-/// The artifact that a task produces or consumes.
+// ---------------------------------------------------------------------------
+// Operator configs
+//
+// Each operator type owns its own fields. There are no shared fields across
+// operator types — the tagged union enforces that exactly one config is set
+// per node, mirroring a protobuf `oneof`.
+//
+// Only `Python` and `Bash` are dispatched in v1. The remaining operator types
+// are defined for schema stability so that IR produced by future tooling can
+// be round-tripped without loss, but the v1 scheduler will reject them.
+// ---------------------------------------------------------------------------
+
+/// Config for a Python callable task.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Port {
-    pub name: String,
-    /// Optional type annotation — e.g. "pd.DataFrame", "str", "int".
-    /// Not enforced in v1; stored for future contract checking.
-    pub type_hint: Option<String>,
+pub struct PythonConfig {
+    /// Dotted module path to the callable, e.g. `"mypackage.tasks.clean"`.
+    pub callable_ref: String,
+    /// Named input ports this task reads. Order is not significant.
+    pub inputs: Vec<String>,
+    /// Named output ports this task produces. Order is not significant.
+    pub outputs: Vec<String>,
 }
 
-/// How the task is invoked.
+/// Config for a Bash command task.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+pub struct BashConfig {
+    /// Shell command to execute.
+    pub cmd: String,
+}
+
+// v2+ operator configs — defined for schema completeness, not dispatched in v1.
+
+/// Config for a SQL query task. v2+.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SqlConfig {
+    /// Connection identifier (DSN, secret name, etc.).
+    pub conn: String,
+    pub query: String,
+}
+
+/// Config for an S3 copy/move task. v2+.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct S3Config {
+    pub src: String,
+    pub dst: String,
+}
+
+/// Config for an HTTP request task. v2+.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HttpConfig {
+    pub url: String,
+    pub method: String,
+}
+
+/// Config for a Kubernetes job task. v2+.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KubernetesConfig {
+    pub image: String,
+    pub cmd: String,
+}
+
+/// How the task is invoked. A tagged union — exactly one operator type and its
+/// config are set per node, enforced at the serialization boundary.
+///
+/// Serialized as `{"operator_type": "<type>", "config": { ... }}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "operator_type", content = "config", rename_all = "snake_case")]
 pub enum TaskRef {
-    /// A Python callable identified by its dotted module path, e.g. `"mypackage.tasks.clean"`.
-    PythonCallable { module_path: String },
-    /// A shell script at the given path.
-    Script { path: String },
-    /// A container image + optional entrypoint override.
-    Container { image: String, entrypoint: Option<Vec<String>> },
+    Python(PythonConfig),
+    Bash(BashConfig),
+    // v2+: defined for schema stability, not dispatched in v1.
+    Sql(SqlConfig),
+    S3(S3Config),
+    Http(HttpConfig),
+    Kubernetes(KubernetesConfig),
 }
 
 /// Retry policy for a node.
@@ -72,12 +128,8 @@ impl Default for Trigger {
 pub struct Node {
     pub id: NodeId,
     pub task_ref: TaskRef,
-    /// Declared input ports. Order is not significant.
-    pub inputs: Vec<Port>,
-    /// Declared output ports. Order is not significant.
-    pub outputs: Vec<Port>,
     pub retry: RetryPolicy,
-    /// Timeout in seconds. None = no timeout.
+    /// Timeout in seconds. `None` = no timeout.
     pub timeout_secs: Option<u64>,
 }
 
@@ -177,9 +229,11 @@ mod tests {
     fn python_node(id: &str) -> Node {
         Node {
             id: id.to_string(),
-            task_ref: TaskRef::PythonCallable { module_path: format!("tasks.{id}") },
-            inputs: vec![],
-            outputs: vec![],
+            task_ref: TaskRef::Python(PythonConfig {
+                callable_ref: format!("tasks.{id}"),
+                inputs: vec![],
+                outputs: vec![],
+            }),
             retry: RetryPolicy::default(),
             timeout_secs: None,
         }
@@ -249,6 +303,39 @@ mod tests {
             let json = serde_json::to_string(&trigger).unwrap();
             let back: Trigger = serde_json::from_str(&json).unwrap();
             assert_eq!(trigger, back);
+        }
+    }
+
+    #[test]
+    fn task_ref_serialization_roundtrip() {
+        let cases: Vec<TaskRef> = vec![
+            TaskRef::Python(PythonConfig {
+                callable_ref: "mymodule.extract".to_string(),
+                inputs: vec![],
+                outputs: vec!["raw".to_string()],
+            }),
+            TaskRef::Bash(BashConfig { cmd: "echo hello".to_string() }),
+            TaskRef::Sql(SqlConfig {
+                conn: "postgres://localhost/db".to_string(),
+                query: "SELECT 1".to_string(),
+            }),
+            TaskRef::S3(S3Config {
+                src: "s3://bucket/in".to_string(),
+                dst: "s3://bucket/out".to_string(),
+            }),
+            TaskRef::Http(HttpConfig {
+                url: "https://example.com".to_string(),
+                method: "GET".to_string(),
+            }),
+            TaskRef::Kubernetes(KubernetesConfig {
+                image: "my-image:latest".to_string(),
+                cmd: "python train.py".to_string(),
+            }),
+        ];
+        for task_ref in cases {
+            let json = serde_json::to_string(&task_ref).unwrap();
+            let back: TaskRef = serde_json::from_str(&json).unwrap();
+            assert_eq!(task_ref, back);
         }
     }
 

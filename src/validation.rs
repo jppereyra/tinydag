@@ -181,26 +181,22 @@ fn validate_inner(dag: &DagDef) -> Result<Vec<NodeId>, Vec<ValidationError>> {
 /// resolve the callable — that is the responsibility of the Python-side strict validator.
 fn invalid_task_ref(task_ref: &TaskRef) -> Option<String> {
     match task_ref {
-        TaskRef::PythonCallable { module_path } => {
-            if module_path.trim().is_empty() {
-                return Some("python callable module_path is empty".to_string());
+        TaskRef::Python(c) => {
+            if c.callable_ref.trim().is_empty() {
+                return Some("python callable_ref is empty".to_string());
             }
             // Identifier syntax is validated by validate_python_refs(), which delegates
-            // to Python's own str.isidentifier() so the rules track the Python version.
+            // to Python's own ast.parse so the rules track the Python version.
             None
         }
-        TaskRef::Script { path } => {
-            if path.trim().is_empty() {
-                return Some("script path is empty".to_string());
+        TaskRef::Bash(c) => {
+            if c.cmd.trim().is_empty() {
+                return Some("bash cmd is empty".to_string());
             }
             None
         }
-        TaskRef::Container { image, .. } => {
-            if image.trim().is_empty() {
-                return Some("container image is empty".to_string());
-            }
-            None
-        }
+        // v2+ operators: fields are not validated in v1.
+        TaskRef::Sql(_) | TaskRef::S3(_) | TaskRef::Http(_) | TaskRef::Kubernetes(_) => None,
     }
 }
 
@@ -245,13 +241,13 @@ fn validate_python_refs_inner(dag: &DagDef) -> Result<(), Vec<ValidationError>> 
     use std::collections::{HashMap, HashSet};
     use std::io::Write;
     use std::process::{Command, Stdio};
-    // Collect (node_id, module_path) for every PythonCallable node.
+    // Collect (node_id, callable_ref) for every Python node.
     let callables: Vec<(&str, &str)> = dag
         .nodes
         .iter()
         .filter_map(|n| {
-            if let TaskRef::PythonCallable { module_path } = &n.task_ref {
-                Some((n.id.as_str(), module_path.as_str()))
+            if let TaskRef::Python(c) = &n.task_ref {
+                Some((n.id.as_str(), c.callable_ref.as_str()))
             } else {
                 None
             }
@@ -363,14 +359,18 @@ print(json.dumps({p: valid(p) for p in paths}))
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{DagDef, Edge, Node, Port, RetryPolicy, TaskRef};
+    use crate::ir::{
+        BashConfig, DagDef, Edge, KubernetesConfig, Node, PythonConfig, RetryPolicy, TaskRef,
+    };
 
     fn python_node(id: &str) -> Node {
         Node {
             id: id.to_string(),
-            task_ref: TaskRef::PythonCallable { module_path: format!("tasks.{id}") },
-            inputs: vec![],
-            outputs: vec![],
+            task_ref: TaskRef::Python(PythonConfig {
+                callable_ref: format!("tasks.{id}"),
+                inputs: vec![],
+                outputs: vec![],
+            }),
             retry: RetryPolicy::default(),
             timeout_secs: None,
         }
@@ -452,13 +452,15 @@ mod tests {
     }
 
     #[test]
-    fn empty_module_path_is_invalid() {
+    fn empty_callable_ref_is_invalid() {
         let mut dag = DagDef::new("bad_ref");
         dag.nodes.push(Node {
             id: "x".to_string(),
-            task_ref: TaskRef::PythonCallable { module_path: "".to_string() },
-            inputs: vec![],
-            outputs: vec![],
+            task_ref: TaskRef::Python(PythonConfig {
+                callable_ref: "".to_string(),
+                inputs: vec![],
+                outputs: vec![],
+            }),
             retry: RetryPolicy::default(),
             timeout_secs: None,
         });
@@ -471,9 +473,11 @@ mod tests {
             let mut dag = DagDef::new("bad_path");
             dag.nodes.push(Node {
                 id: "x".to_string(),
-                task_ref: TaskRef::PythonCallable { module_path: bad.to_string() },
-                inputs: vec![],
-                outputs: vec![],
+                task_ref: TaskRef::Python(PythonConfig {
+                    callable_ref: bad.to_string(),
+                    inputs: vec![],
+                    outputs: vec![],
+                }),
                 retry: RetryPolicy::default(),
                 timeout_secs: None,
             });
@@ -493,9 +497,11 @@ mod tests {
             let mut dag = DagDef::new("good_path");
             dag.nodes.push(Node {
                 id: "x".to_string(),
-                task_ref: TaskRef::PythonCallable { module_path: good.to_string() },
-                inputs: vec![],
-                outputs: vec![],
+                task_ref: TaskRef::Python(PythonConfig {
+                    callable_ref: good.to_string(),
+                    inputs: vec![],
+                    outputs: vec![],
+                }),
                 retry: RetryPolicy::default(),
                 timeout_secs: None,
             });
@@ -504,13 +510,11 @@ mod tests {
     }
 
     #[test]
-    fn no_python_callables_skips_subprocess() {
-        let mut dag = DagDef::new("scripts_only");
+    fn no_python_nodes_skips_subprocess() {
+        let mut dag = DagDef::new("bash_only");
         dag.nodes.push(Node {
             id: "x".to_string(),
-            task_ref: TaskRef::Script { path: "/bin/run.sh".to_string() },
-            inputs: vec![],
-            outputs: vec![],
+            task_ref: TaskRef::Bash(BashConfig { cmd: "echo hello".to_string() }),
             retry: RetryPolicy::default(),
             timeout_secs: None,
         });
@@ -526,9 +530,11 @@ mod tests {
         for id in &["extract", "clean", "load"] {
             dag.nodes.push(Node {
                 id: id.to_string(),
-                task_ref: TaskRef::PythonCallable { module_path: format!("mymodule.{id}") },
-                inputs: vec![],
-                outputs: vec![],
+                task_ref: TaskRef::Python(PythonConfig {
+                    callable_ref: format!("mymodule.{id}"),
+                    inputs: vec![],
+                    outputs: vec![],
+                }),
                 retry: RetryPolicy::default(),
                 timeout_secs: None,
             });
@@ -538,13 +544,11 @@ mod tests {
     }
 
     #[test]
-    fn empty_script_path_is_invalid() {
-        let mut dag = DagDef::new("bad_script");
+    fn empty_bash_cmd_is_invalid() {
+        let mut dag = DagDef::new("bad_bash");
         dag.nodes.push(Node {
             id: "x".to_string(),
-            task_ref: TaskRef::Script { path: "   ".to_string() },
-            inputs: vec![],
-            outputs: vec![],
+            task_ref: TaskRef::Bash(BashConfig { cmd: "   ".to_string() }),
             retry: RetryPolicy::default(),
             timeout_secs: None,
         });
@@ -552,25 +556,20 @@ mod tests {
     }
 
     #[test]
-    fn empty_container_image_is_invalid() {
-        let mut dag = DagDef::new("bad_container");
+    fn v2_operators_pass_structural_validation() {
+        // v2+ operators are defined but not dispatched in v1 — their fields are
+        // not validated at the structural layer.
+        let mut dag = DagDef::new("k8s");
         dag.nodes.push(Node {
             id: "x".to_string(),
-            task_ref: TaskRef::Container { image: "".to_string(), entrypoint: None },
-            inputs: vec![],
-            outputs: vec![],
+            task_ref: TaskRef::Kubernetes(KubernetesConfig {
+                image: "".to_string(),
+                cmd: "".to_string(),
+            }),
             retry: RetryPolicy::default(),
             timeout_secs: None,
         });
-        assert!(matches!(validate(&dag), Err(ref e) if e.iter().any(|e| matches!(e, ValidationError::InvalidTaskRef { node_id, .. } if node_id == "x"))));
-    }
-
-    #[test]
-    fn port_roundtrip_serialization() {
-        let port = Port { name: "x".to_string(), type_hint: Some("pd.DataFrame".to_string()) };
-        let json = serde_json::to_string(&port).unwrap();
-        let back: Port = serde_json::from_str(&json).unwrap();
-        assert_eq!(port, back);
+        assert!(validate(&dag).is_ok());
     }
 
     #[test]
