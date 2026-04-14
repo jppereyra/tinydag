@@ -171,6 +171,13 @@ fn validate_inner(dag: &DagDef) -> Result<Vec<NodeId>, Vec<ValidationError>> {
         return Err(vec![ValidationError::CycleDetected(first)]);
     }
 
+    // FIXME: Feels off to run this here. Think more about this.
+    // Validate Python callable references via subprocess.
+    // Only runs if structural validation passed and Python nodes exist.
+    if dag.nodes.iter().any(|n| matches!(n.task_ref, TaskRef::Python(_))) {
+        validate_python_refs(dag).map_err(|e| e)?;
+    }
+
     Ok(topo_order)
 }
 
@@ -218,7 +225,7 @@ fn invalid_task_ref(task_ref: &TaskRef) -> Option<String> {
         python.unique_path_count = tracing::field::Empty,
     )
 )]
-pub fn validate_python_refs(dag: &DagDef) -> Result<(), Vec<ValidationError>> {
+fn validate_python_refs(dag: &DagDef) -> Result<(), Vec<ValidationError>> {
     let start = Instant::now();
     let result = validate_python_refs_inner(dag);
     global::meter("tinydag")
@@ -481,8 +488,6 @@ mod tests {
                 retry: RetryPolicy::default(),
                 timeout_secs: None,
             });
-            // structural validate() passes — syntax is Python's responsibility
-            assert!(validate(&dag).is_ok(), "structural validate should pass for '{bad}'");
             assert!(
                 matches!(validate_python_refs(&dag), Err(ref e) if e.iter().any(|e| matches!(e, ValidationError::InvalidTaskRef { .. }))),
                 "expected InvalidTaskRef from validate_python_refs for '{bad}'"
