@@ -2,7 +2,7 @@
 
 ### In
 
-- Starlark pipeline DSL with `PythonOperator`
+- Starlark pipeline DSL with `PythonOperator` and `BashOperator`
 - Plain Python task modules with no tinydag imports
 - Parser that compiles to Protobuf IR
 - Structural validation at compile time (cycles, missing references, broken dependencies)

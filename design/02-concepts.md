@@ -63,6 +63,28 @@ flowchart TD
     classDef success fill:#EAF3DE,stroke:#3B6D11,color:#27500A
 ```
 
+## Pre-execution validation
+
+Pre-execution validation is a pass that runs after compilation and before
+any task is dispatched. Its job is to catch failures that are:
+
+- Cheap to check
+- External to the pipeline
+- Worth checking before consuming any execution resources
+
+Two things run in this pass:
+
+**User-declared preconditions.** Plain Python functions that return a
+boolean. The pipeline author declares them explicitly. Examples: a partition
+produced by an external system has landed, an upstream table exists, an SLA
+window is open, an external API is reachable. tinydag does not infer
+preconditions; absence of a declaration produces a compile-time warning,
+and `preconditions=none()` is the explicit opt-out.
+
+**The resolver.** If the pipeline declares late-bound inputs, the resolver
+runs here. If it fails, the pipeline never starts and dependents are
+notified immediately.
+
 ### Inter-pipeline dependencies
 
 A very common failure mode in data warehouses: a pipeline reaches a task where
