@@ -28,9 +28,9 @@ pub type NodeId = String;
 pub struct PythonConfig {
     /// Dotted module path to the callable, e.g. `"mypackage.tasks.clean"`.
     pub callable_ref: String,
-    /// Named input ports this task reads. Order is not significant.
+    /// Named inputs this task reads. Order is not significant.
     pub inputs: Vec<String>,
-    /// Named output ports this task produces. Order is not significant.
+    /// Named outputs this task produces. Order is not significant.
     pub outputs: Vec<String>,
 }
 
