@@ -46,26 +46,62 @@ accept a dispatch payload and emit telemetry)
 - tinydag is backend-agnostic, i.e. the IR carries enough metadata to generate
 the dispatch payload for any target
 
+### Runner
+
+The runner owns the within-run execution loop for a single DAG run. It is
+stateless across runs and has no knowledge of triggers, other pipelines, or
+run history. Given a frozen, validated `DagDef` and an executor, it:
+
+1. Computes the dispatch order
+2. Tracks per-task state: pending, dispatched, succeeded, failed
+3. Dispatches tasks in parallel as their dependencies are satisfied
+4. Collects task outputs and threads them as inputs to downstream tasks
+5. Returns a `RunOutcome` when the run completes or a `RunError` on failure
+
+`run()` is an async function. Each task dispatch is a `tokio::task::spawn`
+that awaits `executor.dispatch()`. The tokio runtime multiplexes all in-flight
+tasks across its thread pool so no OS thread is blocked waiting for a task to
+complete. This model should scale from a handful of tasks on a development
+machine to millions of concurrent tasks dispatched to remote backends.
+
+The scheduler creates runners; runners do not know about schedulers.
+
+**Future direction: explicit dispatch queue**
+
+The current model uses tokio's task scheduler as an implicit queue. A future
+design may introduce an explicit bounded work queue between the scheduler and
+the executor, giving system operators direct observability into dispatch queue
+depth and enabling priority lanes for certain task types. This is a v2+ concern
+and does not change the runner's external interface.
+
 ### Scheduler
 
-tinydag ships with a high-performance embedded scheduler that can be swapped out.
-If you have existing scheduling infrastructure, you can ignore it and trigger
-tinydag externally via the API. The scheduler is not required, but it is fast
-and has no external dependencies.
+The scheduler operates at the pipeline level (and across pipelines) and decides
+when to start a run. It has no knowledge of what is inside a DAG.
 
-**Design philosophy:** most pipeline schedulers are slow because they treat
-scheduling as a database problem. tinydag's scheduler runs fully in memory,
-snapshotting to disk for resiliency. The working set of an active scheduler
-comprises runs in flight, pending tasks, trigger timers and is small enough to
-fit comfortably in memory even for large deployments. This means scheduling
-decisions happen in microseconds, and the latency between "task A completes" and
-"task B is dispatched" is essentially zero.
+Scheduler
+├── tokio::task::spawn(run(pipeline_A_run_1))  ← runner instance 1
+├── tokio::task::spawn(run(pipeline_B_run_1))  ← runner instance 2
+└── tokio::task::spawn(run(pipeline_A_run_2))  ← runner instance 3
 
-The goal is to run very large systems from a single box, with a warm standby for
-failover instead of sharding and adding complexity. A well-designed in-memory
-system can go much further than most teams expect before sharding becomes
-necessary.
+Each runner runs as an independent tokio task on the shared runtime and each
+runner yields the thread while waiting for task completions.
 
+**v0.1: manual trigger only.** The v0.1 scheduler is intentionally minimal.
+It maintains a registry of compiled DAG definitions and accepts manual trigger
+requests. When triggered, it spawns a runner task and tracks the run to
+completion. No persistence, no cron, no inter-pipeline dependencies.
+
+**v2+: full scheduler.** The production scheduler adds cron triggers, event
+triggers, pipeline completion triggers, run history, concurrency limits, and
+error recovery mechanisms. The current design thinking is to run
+very large systems from a single box with a warm standby for failover, rather
+than adding complexity by sharding.
+
+**Heartbeat traffic saturation.** At scale, heartbeat traffic could saturate a
+single control server. More thinking has to go into this, but not for now. From
+the operator's perspective nothing should change, however: it connects to a
+single `TINYDAG_CONTROL_ENDPOINT` and the proxy routing should be transparent.
 
 
 ### Security Model
