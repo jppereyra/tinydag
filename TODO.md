@@ -4,12 +4,12 @@
 
 ### gRPC control protocol
 
-- [ ] Define `.proto` for `OperatorControl` service:
+- [x] Define `.proto` for `OperatorControl` service:
       `ReportStarted`, `ReportHeartbeat`, `ReportSucceeded`, `ReportFailed`
-- [ ] Implement gRPC server in tinydag
-- [ ] Pass gRPC endpoint to operator via environment variable
-- [ ] Update `tinydag-op-bash` to use gRPC protocol
-- [ ] Implement heartbeat timeout detection in the runner
+- [x] Implement gRPC server in tinydag
+- [x] Pass gRPC endpoint to operator via environment variable
+- [x] Update `tinydag-op-bash` to use gRPC protocol
+- [x] Implement heartbeat timeout detection in the runner
 
 ### CLI
 
@@ -94,6 +94,8 @@
 - [ ] Retry logic (max attempts + backoff from IR, no dynamic retry logic)
 - [ ] Partial execution state snapshot on failure (machine-readable, what succeeded / failed / waiting)
 - [ ] Resume from failure point (v1: user-initiated)
+- [ ] Add `ReportSkipped` RPC to `OperatorControl` service when skip semantics
+      are implemented.
 
 ### CLI
 

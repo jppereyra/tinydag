@@ -2,15 +2,32 @@
 name = "tinydag"
 version = "0.1.0"
 edition = "2024"
+default-run = "tinydag"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
 opentelemetry = "0.31"
 tracing = "0.1"
 tracing-opentelemetry = "0.32"
+tonic      = "0.12"
+prost      = "0.13"
+async-trait = "0.1"
+dashmap     = "6"
+tokio      = { version = "1", features = ["rt-multi-thread", "sync", "time", "net", "process", "macros"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "metrics"] }
+opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "metrics"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 serde_json = "1"
+
+[build-dependencies]
+tonic-build = "0.12"

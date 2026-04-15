@@ -1,0 +1,55 @@
+syntax = "proto3";
+
+package operator_control;
+
+// Control protocol between tinydag and operator binaries.
+service OperatorControl {
+  rpc ReportStarted(StartedEvent) returns (Ack);
+  rpc ReportHeartbeat(HeartbeatEvent) returns (Ack);
+  rpc ReportSucceeded(SucceededEvent) returns (Ack);
+  rpc ReportFailed(FailedEvent) returns (Ack);
+}
+
+message Ack {}
+
+// Sent once after the operator has completed self-validation and is
+// about to begin executing its main work.
+message StartedEvent {
+  string run_id = 1;
+  string task_id = 2;
+}
+
+// Proof-of-life, sent at a regular interval while the operator is running.
+message HeartbeatEvent {
+  string run_id = 1;
+  string task_id = 2;
+  int64 timestamp_unix_secs = 3;
+}
+
+// Sent when the operator finishes successfully.
+message SucceededEvent {
+  string run_id = 1;
+  string task_id = 2;
+  // JSON-encoded map of output names to their values. Empty string is equivalent to "{}".
+  string outputs_json = 3;
+}
+
+enum FailedErrorType {
+  // The operator failed for an unspecified reason.
+  UNSPECIFIED = 0;
+  // The operator failed its self-validation checks before starting work.
+  // Retrying is unlikely to help without external intervention.
+  VALIDATION_FAILED = 1;
+  // The operator completed execution but could not produce valid outputs
+  // or failed post-execution checks.
+  INVALID_OUTPUT = 2;
+}
+
+// Sent when the operator fails.
+message FailedEvent {
+  string run_id = 1;
+  string task_id = 2;
+  FailedErrorType error_type = 3;
+  string message = 4;
+  int32 exit_code = 5;
+}
