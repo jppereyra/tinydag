@@ -34,11 +34,53 @@ pub struct PythonConfig {
     pub outputs: Vec<String>,
 }
 
+impl PythonConfig {
+    /// Returns `Some(reason)` if this config fails compile-time validation.
+    pub fn validate_for_compile(&self) -> Option<String> {
+        if self.callable_ref.trim().is_empty() {
+            return Some("python callable_ref is empty".to_string());
+        }
+        if !is_valid_dotted_python_identifier(&self.callable_ref) {
+            return Some(format!(
+                "'{}' is not a valid Python dotted identifier",
+                self.callable_ref,
+            ));
+        }
+        None
+    }
+}
+
 /// Config for a Bash command task.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BashConfig {
     /// Shell command to execute.
     pub cmd: String,
+}
+
+impl BashConfig {
+    /// Returns `Some(reason)` if this config fails compile-time validation.
+    pub fn validate_for_compile(&self) -> Option<String> {
+        if self.cmd.trim().is_empty() {
+            Some("bash cmd is empty".to_string())
+        } else {
+            None
+        }
+    }
+}
+
+/// Returns `true` if every `.`-separated segment of `path` is a valid Python
+/// identifier, as determined by the RustPython parser.
+fn is_valid_dotted_python_identifier(path: &str) -> bool {
+    use rustpython_parser::{ast, parse, Mode};
+    path.split('.').all(|segment| {
+        if segment.is_empty() {
+            return false;
+        }
+        matches!(
+            parse(segment, Mode::Expression, "<validator>"),
+            Ok(ast::Mod::Expression(ref e)) if matches!(e.body.as_ref(), ast::Expr::Name(_))
+        )
+    })
 }
 
 // v2+ operator configs — defined for schema completeness, not dispatched in v1.
@@ -337,6 +379,52 @@ mod tests {
             let back: TaskRef = serde_json::from_str(&json).unwrap();
             assert_eq!(task_ref, back);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // validate_for_compile
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn python_config_empty_callable_ref_is_invalid() {
+        let cfg = PythonConfig { callable_ref: "".to_string(), inputs: vec![], outputs: vec![] };
+        assert!(cfg.validate_for_compile().is_some());
+        let cfg_ws = PythonConfig { callable_ref: "   ".to_string(), inputs: vec![], outputs: vec![] };
+        assert!(cfg_ws.validate_for_compile().is_some());
+    }
+
+    #[test]
+    fn python_config_invalid_dotted_paths_rejected() {
+        for bad in &["my-module.fn", "123module.fn", "mod..fn", ".fn", "mod."] {
+            let cfg = PythonConfig { callable_ref: bad.to_string(), inputs: vec![], outputs: vec![] };
+            assert!(
+                cfg.validate_for_compile().is_some(),
+                "expected validation failure for '{bad}'"
+            );
+        }
+    }
+
+    #[test]
+    fn python_config_valid_dotted_paths_accepted() {
+        // Includes a Unicode identifier — Python 3 identifier rules apply.
+        for good in &["mymodule.fn", "my_module.tasks.clean", "_private.fn", "a.b.c.d", "résumé.parse"] {
+            let cfg = PythonConfig { callable_ref: good.to_string(), inputs: vec![], outputs: vec![] };
+            assert!(
+                cfg.validate_for_compile().is_none(),
+                "expected validation success for '{good}'"
+            );
+        }
+    }
+
+    #[test]
+    fn bash_config_empty_cmd_is_invalid() {
+        assert!(BashConfig { cmd: "".to_string() }.validate_for_compile().is_some());
+        assert!(BashConfig { cmd: "   ".to_string() }.validate_for_compile().is_some());
+    }
+
+    #[test]
+    fn bash_config_valid_cmd() {
+        assert!(BashConfig { cmd: "echo hello".to_string() }.validate_for_compile().is_none());
     }
 
     #[test]

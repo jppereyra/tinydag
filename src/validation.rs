@@ -33,9 +33,6 @@ pub enum ValidationError {
 
     #[error("node '{node_id}' has an invalid task reference: {reason}")]
     InvalidTaskRef { node_id: NodeId, reason: String },
-
-    #[error("python3 unavailable for callable reference validation: {0}")]
-    PythonUnavailable(String),
 }
 
 /// Validate a `DagDef`. Returns the topological order on success.
@@ -171,196 +168,17 @@ fn validate_inner(dag: &DagDef) -> Result<Vec<NodeId>, Vec<ValidationError>> {
         return Err(vec![ValidationError::CycleDetected(first)]);
     }
 
-    // FIXME: Feels off to run this here. Think more about this.
-    // Validate Python callable references via subprocess.
-    // Only runs if structural validation passed and Python nodes exist.
-    if dag.nodes.iter().any(|n| matches!(n.task_ref, TaskRef::Python(_))) {
-        validate_python_refs(dag).map_err(|e| e)?;
-    }
-
     Ok(topo_order)
 }
 
-/// Returns `Some(reason)` if the task reference is structurally invalid, `None` if it is fine.
-///
-/// This is a structural check only: fields must be non-empty and, for Python callables,
-/// the module path must be a valid dotted identifier. It does not attempt to import or
-/// resolve the callable — that is the responsibility of the Python-side strict validator.
+/// Returns `Some(reason)` if the task reference fails compile-time validation.
 fn invalid_task_ref(task_ref: &TaskRef) -> Option<String> {
     match task_ref {
-        TaskRef::Python(c) => {
-            if c.callable_ref.trim().is_empty() {
-                return Some("python callable_ref is empty".to_string());
-            }
-            // Identifier syntax is validated by validate_python_refs(), which delegates
-            // to Python's own ast.parse so the rules track the Python version.
-            None
-        }
-        TaskRef::Bash(c) => {
-            if c.cmd.trim().is_empty() {
-                return Some("bash cmd is empty".to_string());
-            }
-            None
-        }
+        TaskRef::Python(c) => c.validate_for_compile(),
+        TaskRef::Bash(c) => c.validate_for_compile(),
         // v2+ operators: fields are not validated in v1.
         TaskRef::Sql(_) | TaskRef::S3(_) | TaskRef::Http(_) | TaskRef::Kubernetes(_) => None,
     }
-}
-
-/// Validate all `PythonCallable` task references in one Python subprocess.
-///
-/// Collects every unique `module_path` from the DAG, pipes them to a single
-/// `python3 -c` process as JSON, and uses Python's own `ast.parse` to validate
-/// each dotted path. This keeps identifier rules coupled to the Python version
-/// in the user's environment rather than to a regex we maintain.
-///
-/// Call this after [`validate`] passes. It requires `python3` on `PATH` (or
-/// the executable named by `TINYDAG_PYTHON`).
-#[tracing::instrument(
-    skip(dag),
-    fields(
-        dag.id = %dag.dag_id,
-        dag.pipeline_id = %dag.pipeline_id,
-        python.callable_count = tracing::field::Empty,
-        python.unique_path_count = tracing::field::Empty,
-    )
-)]
-fn validate_python_refs(dag: &DagDef) -> Result<(), Vec<ValidationError>> {
-    let start = Instant::now();
-    let result = validate_python_refs_inner(dag);
-    global::meter("tinydag")
-        .f64_histogram("tinydag.validation.python_refs.duration")
-        .with_unit("s")
-        .with_description("Duration of Python callable reference validation including subprocess")
-        .build()
-        .record(
-            start.elapsed().as_secs_f64(),
-            &[
-                KeyValue::new("dag.id", dag.dag_id.clone()),
-                KeyValue::new("dag.pipeline_id", dag.pipeline_id.clone()),
-                KeyValue::new("result", if result.is_ok() { "success" } else { "failure" }),
-            ],
-        );
-    result
-}
-
-fn validate_python_refs_inner(dag: &DagDef) -> Result<(), Vec<ValidationError>> {
-    use std::collections::{HashMap, HashSet};
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    // Collect (node_id, callable_ref) for every Python node.
-    let callables: Vec<(&str, &str)> = dag
-        .nodes
-        .iter()
-        .filter_map(|n| {
-            if let TaskRef::Python(c) = &n.task_ref {
-                Some((n.id.as_str(), c.callable_ref.as_str()))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    if callables.is_empty() {
-        return Ok(());
-    }
-
-    // Deduplicate paths — many nodes may share a module.
-    let unique_paths: Vec<&str> = {
-        let mut seen = HashSet::new();
-        callables.iter().map(|(_, p)| *p).filter(|p| seen.insert(*p)).collect()
-    };
-
-    // Record counts on the current span now that we have them.
-    tracing::Span::current().record("python.callable_count", callables.len());
-    tracing::Span::current().record("python.unique_path_count", unique_paths.len());
-
-    let input =
-        serde_json::to_string(&unique_paths).expect("serializing paths to JSON should not fail");
-
-    // The script reads a JSON list of dotted paths from stdin and writes back a JSON
-    // object mapping each path to a boolean. Python's isidentifier() handles Unicode
-    // and tracks the language version automatically.
-    const VALIDATOR: &str = "\
-import sys, json, ast
-paths = json.load(sys.stdin)
-def valid(path):
-    try:
-        ast.parse(f'import {path}')
-        return True
-    except SyntaxError:
-        return False
-print(json.dumps({p: valid(p) for p in paths}))
-";
-
-    let python = std::env::var("TINYDAG_PYTHON").unwrap_or_else(|_| "python3".to_string());
-
-    let output = {
-        let subprocess_start = Instant::now();
-        let _subprocess = tracing::info_span!(
-            "python_ref_validator.subprocess",
-            python.executable = %python,
-            python.path_count = unique_paths.len(),
-        )
-        .entered();
-
-        let mut child = Command::new(&python)
-            .arg("-c")
-            .arg(VALIDATOR)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| vec![ValidationError::PythonUnavailable(format!("{python}: {e}"))])?;
-
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(input.as_bytes())
-            .map_err(|e| vec![ValidationError::PythonUnavailable(e.to_string())])?;
-
-        let output = child
-            .wait_with_output()
-            .map_err(|e| vec![ValidationError::PythonUnavailable(e.to_string())])?;
-
-        global::meter("tinydag")
-            .f64_histogram("tinydag.validation.python_refs.subprocess.duration")
-            .with_unit("s")
-            .with_description("Duration of the python3 subprocess used for callable reference validation")
-            .build()
-            .record(
-                subprocess_start.elapsed().as_secs_f64(),
-                &[KeyValue::new("python.executable", python.clone())],
-            );
-
-        output
-    };
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(vec![ValidationError::PythonUnavailable(format!(
-            "{python} exited non-zero: {stderr}"
-        ))]);
-    }
-
-    let results: HashMap<String, bool> = serde_json::from_slice(&output.stdout)
-        .map_err(|e| {
-            vec![ValidationError::PythonUnavailable(format!(
-                "failed to parse python3 output: {e}"
-            ))]
-        })?;
-
-    let errors: Vec<ValidationError> = callables
-        .iter()
-        .filter(|(_, path)| !results.get(*path).copied().unwrap_or(false))
-        .map(|(node_id, path)| ValidationError::InvalidTaskRef {
-            node_id: node_id.to_string(),
-            reason: format!("'{path}' is not a valid Python dotted identifier"),
-        })
-        .collect();
-
-    if errors.is_empty() { Ok(()) } else { Err(errors) }
 }
 
 #[cfg(test)]
@@ -459,63 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_callable_ref_is_invalid() {
-        let mut dag = DagDef::new("bad_ref");
-        dag.nodes.push(Node {
-            id: "x".to_string(),
-            task_ref: TaskRef::Python(PythonConfig {
-                callable_ref: "".to_string(),
-                inputs: vec![],
-                outputs: vec![],
-            }),
-            retry: RetryPolicy::default(),
-            timeout_secs: None,
-        });
-        assert!(matches!(validate(&dag), Err(ref e) if e.iter().any(|e| matches!(e, ValidationError::InvalidTaskRef { node_id, .. } if node_id == "x"))));
-    }
-
-    #[test]
-    fn invalid_dotted_paths_rejected_by_python() {
-        for bad in &["my-module.fn", "123module.fn", "mod..fn", ".fn", "mod."] {
-            let mut dag = DagDef::new("bad_path");
-            dag.nodes.push(Node {
-                id: "x".to_string(),
-                task_ref: TaskRef::Python(PythonConfig {
-                    callable_ref: bad.to_string(),
-                    inputs: vec![],
-                    outputs: vec![],
-                }),
-                retry: RetryPolicy::default(),
-                timeout_secs: None,
-            });
-            assert!(
-                matches!(validate_python_refs(&dag), Err(ref e) if e.iter().any(|e| matches!(e, ValidationError::InvalidTaskRef { .. }))),
-                "expected InvalidTaskRef from validate_python_refs for '{bad}'"
-            );
-        }
-    }
-
-    #[test]
-    fn valid_dotted_paths_accepted_by_python() {
-        // Includes a Unicode identifier to confirm Python's rules are used, not an ASCII regex.
-        for good in &["mymodule.fn", "my_module.tasks.clean", "_private.fn", "a.b.c.d", "résumé.parse"] {
-            let mut dag = DagDef::new("good_path");
-            dag.nodes.push(Node {
-                id: "x".to_string(),
-                task_ref: TaskRef::Python(PythonConfig {
-                    callable_ref: good.to_string(),
-                    inputs: vec![],
-                    outputs: vec![],
-                }),
-                retry: RetryPolicy::default(),
-                timeout_secs: None,
-            });
-            assert!(validate_python_refs(&dag).is_ok(), "expected Ok for module_path '{good}'");
-        }
-    }
-
-    #[test]
-    fn no_python_nodes_skips_subprocess() {
+    fn no_python_nodes_skips_validation() {
         let mut dag = DagDef::new("bash_only");
         dag.nodes.push(Node {
             id: "x".to_string(),
@@ -523,14 +285,11 @@ mod tests {
             retry: RetryPolicy::default(),
             timeout_secs: None,
         });
-        assert!(validate_python_refs(&dag).is_ok());
+        assert!(validate(&dag).is_ok());
     }
 
     #[test]
-    fn one_subprocess_for_multiple_nodes() {
-        // All three nodes are valid — we just verify the function succeeds and doesn't
-        // spawn one process per node (observable indirectly: if it did, it would still pass,
-        // but this documents the intent).
+    fn validation_handles_multiple_python_nodes() {
         let mut dag = DagDef::new("multi");
         for id in &["extract", "clean", "load"] {
             dag.nodes.push(Node {
@@ -545,19 +304,7 @@ mod tests {
             });
         }
         dag.edges.extend([edge("extract", "clean"), edge("clean", "load")]);
-        assert!(validate_python_refs(&dag).is_ok());
-    }
-
-    #[test]
-    fn empty_bash_cmd_is_invalid() {
-        let mut dag = DagDef::new("bad_bash");
-        dag.nodes.push(Node {
-            id: "x".to_string(),
-            task_ref: TaskRef::Bash(BashConfig { cmd: "   ".to_string() }),
-            retry: RetryPolicy::default(),
-            timeout_secs: None,
-        });
-        assert!(matches!(validate(&dag), Err(ref e) if e.iter().any(|e| matches!(e, ValidationError::InvalidTaskRef { node_id, .. } if node_id == "x"))));
+        assert!(validate(&dag).is_ok());
     }
 
     #[test]
