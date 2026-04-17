@@ -426,7 +426,7 @@ mod tests {
         let outcome = ex
             .dispatch(bash_payload(
                 "node-1",
-                r#"printf '{"outputs":{"x":42}}'"#,
+                r#"printf '{"outputs":{"x":42}}' > tinydag_outputs.json"#,
                 None,
             ))
             .await
@@ -482,10 +482,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_stdout_returns_parse_error() {
+    async fn invalid_outputs_file_returns_parse_error() {
         let ex = bash_executor().await;
         let err = ex
-            .dispatch(bash_payload("node-1", "echo not-json", None))
+            .dispatch(bash_payload(
+                "node-1",
+                "echo not-json > tinydag_outputs.json",
+                None,
+            ))
             .await
             .unwrap_err();
         assert!(matches!(err, ExecutorError::OutputParseFailed { .. }));
@@ -502,7 +506,7 @@ mod tests {
         let outcome = ex
             .dispatch(bash_payload(
                 "grpc-ok",
-                r#"printf '{"outputs":{"result":"hello","n":7}}'"#,
+                r#"printf '{"outputs":{"result":"hello","n":7}}' > tinydag_outputs.json"#,
                 None,
             ))
             .await

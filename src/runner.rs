@@ -326,7 +326,7 @@ mod tests {
         let dag = compile_dag(
             r#"
 dag("test")
-bash_operator("a", cmd="printf '{\"outputs\":{}}'  ")
+bash_operator("a", cmd="true")
 "#,
         );
         let outcome = run(RunConfig {
@@ -360,9 +360,9 @@ bash_operator("a", cmd="exit 1")
         let dag = compile_dag(
             r#"
 dag("chain")
-a = bash_operator("a", cmd="printf '{\"outputs\":{}}'  ")
-b = bash_operator("b", cmd="printf '{\"outputs\":{}}'  ", depends_on=a)
-bash_operator("c", cmd="printf '{\"outputs\":{}}'  ", depends_on=b)
+a = bash_operator("a", cmd="true")
+b = bash_operator("b", cmd="true", depends_on=a)
+bash_operator("c", cmd="true", depends_on=b)
 "#,
         );
         let outcome = run(RunConfig {
@@ -388,10 +388,10 @@ bash_operator("c", cmd="printf '{\"outputs\":{}}'  ", depends_on=b)
         let dag = compile_dag(
             r#"
 dag("diamond")
-a = bash_operator("a", cmd="printf '{\"outputs\":{}}'  ")
-b = bash_operator("b", cmd="printf '{\"outputs\":{}}'  ", depends_on=a)
-c = bash_operator("c", cmd="printf '{\"outputs\":{}}'  ", depends_on=a)
-bash_operator("d", cmd="printf '{\"outputs\":{}}'  ", depends_on=[b, c])
+a = bash_operator("a", cmd="true")
+b = bash_operator("b", cmd="true", depends_on=a)
+c = bash_operator("c", cmd="true", depends_on=a)
+bash_operator("d", cmd="true", depends_on=[b, c])
 "#,
         );
         let outcome = run(RunConfig {
@@ -419,9 +419,9 @@ bash_operator("d", cmd="printf '{\"outputs\":{}}'  ", depends_on=[b, c])
         let dag = compile_dag(
             r#"
 dag("dup")
-a = bash_operator("a", cmd="printf '{\"outputs\":{\"x\":1}}'")
-b = bash_operator("b", cmd="printf '{\"outputs\":{\"x\":2}}'")
-bash_operator("c", cmd="printf '{\"outputs\":{}}'  ", depends_on=[a, b])
+a = bash_operator("a", cmd="printf '{\"outputs\":{\"x\":1}}' > tinydag_outputs.json")
+b = bash_operator("b", cmd="printf '{\"outputs\":{\"x\":2}}' > tinydag_outputs.json")
+bash_operator("c", cmd="true", depends_on=[a, b])
 "#,
         );
         let err = run(RunConfig {
@@ -443,9 +443,9 @@ bash_operator("c", cmd="printf '{\"outputs\":{}}'  ", depends_on=[a, b])
         let dag = compile_dag(
             r#"
 dag("merge")
-a = bash_operator("a", cmd="printf '{\"outputs\":{\"x\":1}}'")
-b = bash_operator("b", cmd="printf '{\"outputs\":{\"y\":2}}'")
-bash_operator("c", cmd="printf '{\"outputs\":{}}'  ", depends_on=[a, b])
+a = bash_operator("a", cmd="printf '{\"outputs\":{\"x\":1}}' > tinydag_outputs.json")
+b = bash_operator("b", cmd="printf '{\"outputs\":{\"y\":2}}' > tinydag_outputs.json")
+bash_operator("c", cmd="true", depends_on=[a, b])
 "#,
         );
         let outcome = run(RunConfig {

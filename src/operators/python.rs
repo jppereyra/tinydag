@@ -69,7 +69,7 @@ pub fn run() -> ! {
     use std::process::{Command, Stdio};
     use std::sync::atomic::Ordering;
 
-    use super::{CHILD_PGID, FailedErrorType, parse_outputs_json, run_operator, scalar_str};
+    use super::{CHILD_PGID, FailedErrorType, read_outputs_file, run_operator};
 
     run_operator("python", |payload, work_dir| {
         let script = payload["task_ref"]["script"].as_str().ok_or_else(|| {
@@ -79,10 +79,6 @@ pub fn run() -> ! {
                 1,
             )
         })?;
-
-        let empty = serde_json::Map::new();
-        let inputs = payload["inputs"].as_object().unwrap_or(&empty);
-        let params = payload["dag_params"].as_object().unwrap_or(&empty);
 
         fs::write(
             work_dir.join("tinydag_inputs.json"),
@@ -98,25 +94,12 @@ pub fn run() -> ! {
         let python = std::env::var("TINYDAG_PYTHON").unwrap_or_else(|_| "python3".to_string());
 
         let mut py = Command::new(&python);
-        py.arg(script).current_dir(work_dir).stdout(Stdio::piped());
-        for (k, v) in inputs {
-            if let Some(s) = scalar_str(v) {
-                py.env(
-                    format!("TINYDAG_INPUT_{}", k.to_uppercase().replace('-', "_")),
-                    s,
-                );
-            }
-        }
-        for (k, v) in params {
-            if let Some(s) = scalar_str(v) {
-                py.env(
-                    format!("TINYDAG_PARAM_{}", k.to_uppercase().replace('-', "_")),
-                    s,
-                );
-            }
-        }
+        py.arg(script)
+            .current_dir(work_dir)
+            .stdout(Stdio::inherit())
+            .env("TINYDAG_WORK_DIR", work_dir);
 
-        let child = unsafe {
+        let mut child = unsafe {
             py.pre_exec(|| {
                 libc::setsid();
                 Ok(())
@@ -131,17 +114,17 @@ pub fn run() -> ! {
             })?
         };
         CHILD_PGID.store(child.id() as i32, Ordering::SeqCst);
-        let output = child.wait_with_output().map_err(io_err)?;
+        let status = child.wait().map_err(io_err)?;
 
-        if !output.status.success() {
-            let code = output.status.code().unwrap_or(-1);
+        if !status.success() {
+            let code = status.code().unwrap_or(-1);
             return Err((
                 FailedErrorType::Unspecified,
                 format!("python exited {code}"),
                 code,
             ));
         }
-        parse_outputs_json(&output.stdout)
+        read_outputs_file(work_dir)
     })
 }
 
@@ -217,7 +200,9 @@ mod tests {
     #[tokio::test]
     async fn run_successful_returns_outputs() {
         use crate::executor::Executor as _;
-        let script = write_script("import json; print(json.dumps({'outputs':{'result':99}}))\n");
+        let script = write_script(
+            "import json\nwith open('tinydag_outputs.json','w') as f: json.dump({'outputs':{'result':99}},f)\n",
+        );
         let ex = python_executor().await;
         let outcome = ex
             .dispatch(python_payload("py-1", &script.to_string_lossy()))
@@ -252,10 +237,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_inputs_exposed_as_env_vars() {
+    async fn run_inputs_exposed_in_json_file() {
         use crate::executor::Executor as _;
         let script = write_script(
-            "import os, json\nprint(json.dumps({'outputs':{'v': os.environ['TINYDAG_INPUT_MY_KEY']}}))\n",
+            "import json\nins=json.load(open('tinydag_inputs.json'))\nwith open('tinydag_outputs.json','w') as f: json.dump({'outputs':{'v':ins['my-key']}},f)\n",
         );
         let mut inputs = std::collections::HashMap::new();
         inputs.insert("my-key".to_string(), serde_json::json!("hello"));
@@ -273,10 +258,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_params_exposed_as_env_vars() {
+    async fn run_params_exposed_in_json_file() {
         use crate::executor::Executor as _;
         let script = write_script(
-            "import os, json\nprint(json.dumps({'outputs':{'env': os.environ['TINYDAG_PARAM_ENV']}}))\n",
+            "import json\nparams=json.load(open('tinydag_params.json'))\nwith open('tinydag_outputs.json','w') as f: json.dump({'outputs':{'env':params['env']}},f)\n",
         );
         let mut params = std::collections::HashMap::new();
         params.insert("env".to_string(), serde_json::json!("prod"));

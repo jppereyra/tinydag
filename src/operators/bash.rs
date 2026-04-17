@@ -113,15 +113,11 @@ pub fn run() -> ! {
     use std::process::{Command, Stdio};
     use std::sync::atomic::Ordering;
 
-    use super::{CHILD_PGID, FailedErrorType, parse_outputs_json, run_operator, scalar_str};
+    use super::{CHILD_PGID, FailedErrorType, read_outputs_file, run_operator};
 
     run_operator("bash", |payload, work_dir| {
         let cmd_val = payload["task_ref"]["cmd"].as_str();
         let script_val = payload["task_ref"]["script"].as_str();
-
-        let empty = serde_json::Map::new();
-        let inputs = payload["inputs"].as_object().unwrap_or(&empty);
-        let params = payload["dag_params"].as_object().unwrap_or(&empty);
 
         fs::write(
             work_dir.join("tinydag_inputs.json"),
@@ -153,25 +149,10 @@ pub fn run() -> ! {
         let mut bash = Command::new("bash");
         bash.arg(&script_path)
             .current_dir(work_dir)
-            .stdout(Stdio::piped());
-        for (k, v) in inputs {
-            if let Some(s) = scalar_str(v) {
-                bash.env(
-                    format!("TINYDAG_INPUT_{}", k.to_uppercase().replace('-', "_")),
-                    s,
-                );
-            }
-        }
-        for (k, v) in params {
-            if let Some(s) = scalar_str(v) {
-                bash.env(
-                    format!("TINYDAG_PARAM_{}", k.to_uppercase().replace('-', "_")),
-                    s,
-                );
-            }
-        }
+            .stdout(Stdio::inherit())
+            .env("TINYDAG_WORK_DIR", work_dir);
 
-        let child = unsafe {
+        let mut child = unsafe {
             bash.pre_exec(|| {
                 libc::setsid();
                 Ok(())
@@ -180,17 +161,17 @@ pub fn run() -> ! {
             .map_err(io_err)?
         };
         CHILD_PGID.store(child.id() as i32, Ordering::SeqCst);
-        let output = child.wait_with_output().map_err(io_err)?;
+        let status = child.wait().map_err(io_err)?;
 
-        if !output.status.success() {
-            let code = output.status.code().unwrap_or(-1);
+        if !status.success() {
+            let code = status.code().unwrap_or(-1);
             return Err((
                 FailedErrorType::Unspecified,
                 format!("bash exited {code}"),
                 code,
             ));
         }
-        parse_outputs_json(&output.stdout)
+        read_outputs_file(work_dir)
     })
 }
 

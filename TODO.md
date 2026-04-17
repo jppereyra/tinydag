@@ -40,7 +40,7 @@
       compiler won't catch it.
 - [ ] `compute_version_hash` hashes node IDs, edges,
       and params but not the `TaskRef` content (cmd strings, script paths).
-- [ ] Any stray `print()` from a script or imported library corrupts the output JSON.
+- [x] Any stray `print()` from a script or imported library corrupts the output JSON.
       What if we write outputs `tinydag_outputs.json` in the work dir as we do with `tinydag_inputs.json`.
 - [ ] `dispatch`, `run`, and `validate` all call `global::meter(...).f64_histogram(...)`
       on every invocation. OTel deduplicates internally but we're still doing string allocations and map lookups on every task.
@@ -63,6 +63,12 @@
 ---
 
 ## Beyond v0.1
+
+### Distribution
+
+- [ ] `brew install tinydag`
+- [ ] `.deb`, `.rpm`,  AUR package
+- [ ] `cargo install tinydag`
 
 ### DAG Schema
 

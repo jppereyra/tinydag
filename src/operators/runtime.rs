@@ -152,43 +152,42 @@ impl GrpcSession {
 // Public helpers
 // ---------------------------------------------------------------------------
 
-/// Parse operator stdout as `{"outputs": {...}}`.
+/// Read `tinydag_outputs.json` from the operator's work directory.
 ///
-/// Returns the serialized inner map on success, or an `InvalidOutput` error
-/// triple on failure.
-pub fn parse_outputs_json(stdout: &[u8]) -> Result<String, (FailedErrorType, String, i32)> {
-    let stdout_str = String::from_utf8_lossy(stdout);
-    if stdout_str.trim().is_empty() {
+/// File absent → `Ok("{}")`. File present with valid `{"outputs": {...}}` →
+/// `Ok(serialized_inner_map)`. File present but invalid → `Err(InvalidOutput, ...)`.
+pub fn read_outputs_file(work_dir: &Path) -> Result<String, (FailedErrorType, String, i32)> {
+    let path = work_dir.join("tinydag_outputs.json");
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok("{}".to_string()),
+        Err(e) => {
+            return Err((
+                FailedErrorType::InvalidOutput,
+                format!("failed to read tinydag_outputs.json: {e}"),
+                0,
+            ));
+        }
+    };
+    if contents.trim().is_empty() {
         return Ok("{}".to_string());
     }
-    match serde_json::from_str::<serde_json::Value>(&stdout_str) {
+    match serde_json::from_str::<serde_json::Value>(&contents) {
         Ok(v) => match v.get("outputs") {
             Some(outputs) => {
                 Ok(serde_json::to_string(outputs).unwrap_or_else(|_| "{}".to_string()))
             }
             None => Err((
                 FailedErrorType::InvalidOutput,
-                "stdout did not contain an \"outputs\" key".to_string(),
+                "tinydag_outputs.json did not contain an \"outputs\" key".to_string(),
                 0,
             )),
         },
         Err(e) => Err((
             FailedErrorType::InvalidOutput,
-            format!("expected {{\"outputs\": {{...}}}} from stdout: {e}"),
+            format!("expected {{\"outputs\": {{...}}}} in tinydag_outputs.json: {e}"),
             0,
         )),
-    }
-}
-
-/// Convert a scalar JSON value to a string suitable for an environment variable.
-///
-/// Returns `None` for objects, arrays, and null.
-pub fn scalar_str(v: &serde_json::Value) -> Option<String> {
-    match v {
-        serde_json::Value::String(s) => Some(s.clone()),
-        serde_json::Value::Number(n) => Some(n.to_string()),
-        serde_json::Value::Bool(b) => Some(b.to_string()),
-        _ => None,
     }
 }
 
