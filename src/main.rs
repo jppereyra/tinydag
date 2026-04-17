@@ -11,7 +11,7 @@ async fn main() {
 
     let exit_code = match args.get(1).map(String::as_str) {
         Some("compile") => cmd_compile(&args),
-        Some("run") => cmd_run(&args).await,
+        Some("add") => cmd_add(&args).await,
         _ => {
             eprintln!("usage: tinydag <command> [args]");
             eprintln!();
@@ -20,7 +20,7 @@ async fn main() {
                 "  compile <pipeline.star> [--output <path>]   Compile a Starlark pipeline to a DAG"
             );
             eprintln!(
-                "  run <pipeline.star>                          Compile and execute a Starlark pipeline"
+                "  add <pipeline.star> [--run-now]              Register a pipeline with the scheduler"
             );
             1
         }
@@ -92,11 +92,13 @@ fn cmd_compile(args: &[String]) -> i32 {
     }
 }
 
-async fn cmd_run(args: &[String]) -> i32 {
+async fn cmd_add(args: &[String]) -> i32 {
     let Some(path) = args.get(2) else {
-        eprintln!("usage: tinydag run <pipeline.star>");
+        eprintln!("usage: tinydag add <pipeline.star> [--run-now]");
         return 1;
     };
+
+    let run_now = args.iter().any(|a| a == "--run-now");
 
     let dag = match tinydag::compiler::compile(Path::new(path)) {
         Ok(d) => d,
@@ -107,9 +109,16 @@ async fn cmd_run(args: &[String]) -> i32 {
     };
 
     let dag_id = dag.dag_id().to_string();
+    let node_count = dag.nodes().len();
     let executor = Arc::new(LocalExecutor::new().await);
     let scheduler = tinydag::scheduler::Scheduler::new(executor);
     scheduler.register(dag);
+
+    if !run_now {
+        println!("registered {dag_id} ({node_count} nodes)");
+        return 0;
+    }
+
     match scheduler.trigger(&dag_id).unwrap().await.unwrap() {
         Ok(outcome) => {
             println!(
