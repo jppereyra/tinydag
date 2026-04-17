@@ -3,6 +3,12 @@ name = "tinydag"
 version = "0.1.0"
 edition = "2024"
 default-run = "tinydag"
+description = "A tiny, embedded-first DAG orchestrator written in Rust"
+repository = "https://github.com/jppereyra/tinydag"
+homepage = "https://github.com/jppereyra/tinydag"
+license = "MIT OR Apache-2.0"
+keywords = ["dag", "orchestration", "pipeline", "workflow"]
+categories = ["development-tools"]
 
 [[bin]]
 name = "tinydag-op-python"

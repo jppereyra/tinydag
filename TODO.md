@@ -22,7 +22,7 @@
 
 - [x] Write a realistic two or three task example pipeline in `examples/`
       (extract, transform, load shape using BashOperator and PythonOperator).
-- [ ] Include a `README` in `examples/` with step-by-step instructions to run it
+- [x] Include a `README` in `examples/` with step-by-step instructions to run it
 
 ### Polish
 

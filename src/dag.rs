@@ -1,6 +1,6 @@
 //! DAG type definitions for tinydag.
 //!
-//! The DAG definition is the contract between the Python DSL (or any external system) and
+//! The DAG definition is the contract between the Starlark DSL (or any external system) and
 //! the Rust orchestrator. It must be serializable, versionable, and free of any
 //! execution logic.
 

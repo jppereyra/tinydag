@@ -9,7 +9,7 @@
 - Callable validation at compile time (strict mode by default)
 - Explicit precondition functions required on every pipeline
 - Pipeline-level resolver for late-bound inputs
-- CI/CD as the deployment gate (`tinydag compile`, `tinydag register`)
+- CI/CD as the deployment gate (`tinydag compile`, `tinydag add`)
 - Local executor: runs tasks as subprocesses on the same machine, no remote dispatch
 - Cron and manual triggers only
 - Task-level telemetry via OpenTelemetry: structured events, structured errors,
