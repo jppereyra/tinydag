@@ -14,9 +14,8 @@
 ### CLI
 
 ~~- [x] `tinydag run <pipeline.star>`: compiles, validates and runs the pipeline~~
-~~- [x] `tinydag compile <pipeline.star>`: Starlark parser, validate, emit DAG JSON~~
-- [] `tinydag add <pipeline.star>`: compiles, validates and registers the pipeline,
-optional --run-now runs it now.
+- [x] `tinydag compile <pipeline.star>`: Starlark parser, validate, emit DAG JSON
+- [x] `tinydag add <pipeline.star> [--run-now]`: compiles, validates and registers the pipeline; --run-now triggers an immediate run
 
 
 ### Example pipeline
@@ -29,7 +28,7 @@ optional --run-now runs it now.
 
 - [ ] Structured error output in CLI: errors should be human-readable and
       machine-parseable
-- [ ] `tinydag run` exit codes: 0 success, 1 compile/validation error, 2 task failed,
+- [ ] `tinydag add` exit codes: 0 success, 1 compile/validation error, 2 task failed,
       3 internal error
 
 ---
