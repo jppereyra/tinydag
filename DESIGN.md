@@ -16,6 +16,7 @@ to a formal RFC process.
 5. [Observability](design/05-observability.md) -- how to peek inside the box
 6. [Internals](design/06-internals.md) -- the guts
 7. [Roadmap](design/07-roadmap.md) -- how will we make it happen
+7. [Open Questions](design/08-open-questions.md) -- what we need to think more about
 
 ---
 
