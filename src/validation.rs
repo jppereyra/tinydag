@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
-use opentelemetry::{global, KeyValue};
+use opentelemetry::{KeyValue, global};
 use thiserror::Error;
 
 use crate::dag::{DagDef, NodeId};
@@ -133,12 +133,17 @@ fn validate_inner(dag: &DagDef) -> Result<Vec<NodeId>, Vec<ValidationError>> {
         dag.nodes.iter().map(|n| (n.id.as_str(), vec![])).collect();
 
     for edge in &dag.edges {
-        adj.get_mut(edge.from.as_str()).unwrap().push(edge.to.as_str());
+        adj.get_mut(edge.from.as_str())
+            .unwrap()
+            .push(edge.to.as_str());
         *in_degree.get_mut(edge.to.as_str()).unwrap() += 1;
     }
 
-    let mut queue: VecDeque<&str> =
-        in_degree.iter().filter(|&(_, &d)| d == 0).map(|(&id, _)| id).collect();
+    let mut queue: VecDeque<&str> = in_degree
+        .iter()
+        .filter(|&(_, &d)| d == 0)
+        .map(|(&id, _)| id)
+        .collect();
 
     // Sort for deterministic output.
     let mut queue_vec: Vec<&str> = queue.drain(..).collect();
@@ -179,22 +184,26 @@ fn validate_inner(dag: &DagDef) -> Result<Vec<NodeId>, Vec<ValidationError>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dag::{
-        DagDef, Edge, Node, RetryPolicy, TaskRef,
-    };
+    use crate::dag::{DagDef, Edge, Node, RetryPolicy, TaskRef};
     use crate::operators::BashOperator;
 
     fn bash_node(id: &str) -> Node {
         Node {
             id: id.to_string(),
-            task_ref: TaskRef::Bash(BashOperator { cmd: Some("echo ok".to_string()), script: None }),
+            task_ref: TaskRef::Bash(BashOperator {
+                cmd: Some("echo ok".to_string()),
+                script: None,
+            }),
             retry: RetryPolicy::default(),
             timeout_secs: None,
         }
     }
 
     fn edge(from: &str, to: &str) -> Edge {
-        Edge { from: from.to_string(), to: to.to_string() }
+        Edge {
+            from: from.to_string(),
+            to: to.to_string(),
+        }
     }
 
     #[test]
@@ -213,17 +222,34 @@ mod tests {
     #[test]
     fn linear_chain_returns_topo_order() {
         let mut dag = DagDef::new("chain");
-        dag.nodes.extend([bash_node("a"), bash_node("b"), bash_node("c")]);
+        dag.nodes
+            .extend([bash_node("a"), bash_node("b"), bash_node("c")]);
         dag.edges.extend([edge("a", "b"), edge("b", "c")]);
-        assert_eq!(validate(&dag), Ok(vec!["a", "b", "c"].into_iter().map(str::to_string).collect()));
+        assert_eq!(
+            validate(&dag),
+            Ok(vec!["a", "b", "c"]
+                .into_iter()
+                .map(str::to_string)
+                .collect())
+        );
     }
 
     #[test]
     fn diamond_dag_is_valid() {
         // a -> b, a -> c, b -> d, c -> d
         let mut dag = DagDef::new("diamond");
-        dag.nodes.extend([bash_node("a"), bash_node("b"), bash_node("c"), bash_node("d")]);
-        dag.edges.extend([edge("a", "b"), edge("a", "c"), edge("b", "d"), edge("c", "d")]);
+        dag.nodes.extend([
+            bash_node("a"),
+            bash_node("b"),
+            bash_node("c"),
+            bash_node("d"),
+        ]);
+        dag.edges.extend([
+            edge("a", "b"),
+            edge("a", "c"),
+            edge("b", "d"),
+            edge("c", "d"),
+        ]);
         let order = validate(&dag).unwrap();
         assert_eq!(order[0], "a");
         assert_eq!(order[3], "d");
@@ -232,9 +258,13 @@ mod tests {
     #[test]
     fn cycle_is_detected() {
         let mut dag = DagDef::new("cycle");
-        dag.nodes.extend([bash_node("a"), bash_node("b"), bash_node("c")]);
-        dag.edges.extend([edge("a", "b"), edge("b", "c"), edge("c", "a")]);
-        assert!(matches!(validate(&dag), Err(ref e) if e.iter().any(|e| matches!(e, ValidationError::CycleDetected(_)))));
+        dag.nodes
+            .extend([bash_node("a"), bash_node("b"), bash_node("c")]);
+        dag.edges
+            .extend([edge("a", "b"), edge("b", "c"), edge("c", "a")]);
+        assert!(
+            matches!(validate(&dag), Err(ref e) if e.iter().any(|e| matches!(e, ValidationError::CycleDetected(_))))
+        );
     }
 
     #[test]
@@ -242,22 +272,29 @@ mod tests {
         let mut dag = DagDef::new("unknown");
         dag.nodes.push(bash_node("a"));
         dag.edges.push(edge("a", "ghost"));
-        assert!(matches!(validate(&dag), Err(ref e) if e.iter().any(|e| matches!(e, ValidationError::UnknownNode(id) if id == "ghost"))));
+        assert!(
+            matches!(validate(&dag), Err(ref e) if e.iter().any(|e| matches!(e, ValidationError::UnknownNode(id) if id == "ghost")))
+        );
     }
 
     #[test]
     fn duplicate_node_id_is_detected() {
         let mut dag = DagDef::new("dupe");
         dag.nodes.extend([bash_node("a"), bash_node("a")]);
-        assert!(matches!(validate(&dag), Err(ref e) if e.iter().any(|e| matches!(e, ValidationError::DuplicateNodeId(id) if id == "a"))));
+        assert!(
+            matches!(validate(&dag), Err(ref e) if e.iter().any(|e| matches!(e, ValidationError::DuplicateNodeId(id) if id == "a")))
+        );
     }
 
     #[test]
     fn disconnected_node_in_multi_node_dag_is_invalid() {
         let mut dag = DagDef::new("disconnected");
-        dag.nodes.extend([bash_node("a"), bash_node("b"), bash_node("orphan")]);
+        dag.nodes
+            .extend([bash_node("a"), bash_node("b"), bash_node("orphan")]);
         dag.edges.push(edge("a", "b"));
-        assert!(matches!(validate(&dag), Err(ref e) if e.iter().any(|e| matches!(e, ValidationError::DisconnectedNode(id) if id == "orphan"))));
+        assert!(
+            matches!(validate(&dag), Err(ref e) if e.iter().any(|e| matches!(e, ValidationError::DisconnectedNode(id) if id == "orphan")))
+        );
     }
 
     #[test]
@@ -273,12 +310,16 @@ mod tests {
         for id in &["extract", "clean", "load"] {
             dag.nodes.push(Node {
                 id: id.to_string(),
-                task_ref: TaskRef::Bash(BashOperator { cmd: Some("echo ok".to_string()), script: None }),
+                task_ref: TaskRef::Bash(BashOperator {
+                    cmd: Some("echo ok".to_string()),
+                    script: None,
+                }),
                 retry: RetryPolicy::default(),
                 timeout_secs: None,
             });
         }
-        dag.edges.extend([edge("extract", "clean"), edge("clean", "load")]);
+        dag.edges
+            .extend([edge("extract", "clean"), edge("clean", "load")]);
         assert!(validate(&dag).is_ok());
     }
 }

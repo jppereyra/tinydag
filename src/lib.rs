@@ -1,7 +1,7 @@
 pub mod compiler;
 pub mod control_server;
-pub mod executor;
 pub mod dag;
+pub mod executor;
 pub mod operators;
 pub mod runner;
 pub mod scheduler;

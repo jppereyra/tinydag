@@ -47,7 +47,7 @@ impl Operator for TaskRef {
     fn type_name(&self) -> &'static str {
         match self {
             TaskRef::Python(c) => c.type_name(),
-            TaskRef::Bash(c) =>  c.type_name(),
+            TaskRef::Bash(c) => c.type_name(),
         }
     }
 }
@@ -62,7 +62,10 @@ pub struct RetryPolicy {
 
 impl Default for RetryPolicy {
     fn default() -> Self {
-        RetryPolicy { max_attempts: 1, delay_secs: 0 }
+        RetryPolicy {
+            max_attempts: 1,
+            delay_secs: 0,
+        }
     }
 }
 
@@ -81,7 +84,6 @@ pub enum Trigger {
     /// `upstream_pipeline_id` identifies the pipeline this one depends on.
     PipelineCompletion { upstream_pipeline_id: String },
 }
-
 
 /// A single node in the DAG.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -153,17 +155,39 @@ impl DagDef {
         }
     }
 
-    pub fn dag_id(&self) -> &str { &self.dag_id }
-    pub fn pipeline_id(&self) -> &str { &self.pipeline_id }
-    pub fn version(&self) -> u32 { self.version }
-    pub fn version_hash(&self) -> &str { &self.version_hash }
-    pub fn trigger(&self) -> &Trigger { &self.trigger }
-    pub fn team(&self) -> &str { &self.team }
-    pub fn user(&self) -> &str { &self.user }
-    pub fn nodes(&self) -> &[Node] { &self.nodes }
-    pub fn edges(&self) -> &[Edge] { &self.edges }
-    pub fn params(&self) -> &HashMap<String, serde_json::Value> { &self.params }
-    pub fn metadata(&self) -> &HashMap<String, String> { &self.metadata }
+    pub fn dag_id(&self) -> &str {
+        &self.dag_id
+    }
+    pub fn pipeline_id(&self) -> &str {
+        &self.pipeline_id
+    }
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+    pub fn version_hash(&self) -> &str {
+        &self.version_hash
+    }
+    pub fn trigger(&self) -> &Trigger {
+        &self.trigger
+    }
+    pub fn team(&self) -> &str {
+        &self.team
+    }
+    pub fn user(&self) -> &str {
+        &self.user
+    }
+    pub fn nodes(&self) -> &[Node] {
+        &self.nodes
+    }
+    pub fn edges(&self) -> &[Edge] {
+        &self.edges
+    }
+    pub fn params(&self) -> &HashMap<String, serde_json::Value> {
+        &self.params
+    }
+    pub fn metadata(&self) -> &HashMap<String, String> {
+        &self.metadata
+    }
 
     /// Compute a deterministic SHA-256 hash over the DAG's structural content:
     /// dag_id, pipeline_id, sorted node IDs, and sorted edges.
@@ -187,8 +211,11 @@ impl DagDef {
         }
 
         // Edges: sort (from, to) pairs.
-        let mut edges: Vec<(&str, &str)> =
-            self.edges.iter().map(|e| (e.from.as_str(), e.to.as_str())).collect();
+        let mut edges: Vec<(&str, &str)> = self
+            .edges
+            .iter()
+            .map(|e| (e.from.as_str(), e.to.as_str()))
+            .collect();
         edges.sort_unstable();
         for (from, to) in &edges {
             hasher.update(from.as_bytes());
@@ -235,7 +262,10 @@ mod tests {
         let mut dag = DagDef::new("train");
         dag.pipeline_id = "ml-pipeline".to_string();
         dag.nodes.extend([python_node("a"), python_node("b")]);
-        dag.edges.push(Edge { from: "a".to_string(), to: "b".to_string() });
+        dag.edges.push(Edge {
+            from: "a".to_string(),
+            to: "b".to_string(),
+        });
 
         let h1 = dag.compute_version_hash();
         let h2 = dag.compute_version_hash();
@@ -286,9 +316,15 @@ mod tests {
     fn trigger_serialization_roundtrip() {
         let cases = vec![
             Trigger::Manual,
-            Trigger::Cron { schedule: "0 6 * * *".to_string() },
-            Trigger::Event { event_type: "data.arrived".to_string() },
-            Trigger::PipelineCompletion { upstream_pipeline_id: "ingest-pipeline".to_string() },
+            Trigger::Cron {
+                schedule: "0 6 * * *".to_string(),
+            },
+            Trigger::Event {
+                event_type: "data.arrived".to_string(),
+            },
+            Trigger::PipelineCompletion {
+                upstream_pipeline_id: "ingest-pipeline".to_string(),
+            },
         ];
         for trigger in cases {
             let json = serde_json::to_string(&trigger).unwrap();
@@ -305,7 +341,10 @@ mod tests {
                 inputs: vec![],
                 outputs: vec!["raw".to_string()],
             }),
-            TaskRef::Bash(BashOperator { cmd: Some("echo hello".to_string()), script: None }),
+            TaskRef::Bash(BashOperator {
+                cmd: Some("echo hello".to_string()),
+                script: None,
+            }),
         ];
         for task_ref in cases {
             let json = serde_json::to_string(&task_ref).unwrap();
@@ -317,9 +356,12 @@ mod tests {
     #[test]
     fn dag_params_serializes_to_json() {
         let mut dag = DagDef::new("parameterized");
-        dag.params.insert("env".to_string(), serde_json::json!("prod"));
-        dag.params.insert("batch_size".to_string(), serde_json::json!(100));
-        dag.params.insert("debug".to_string(), serde_json::json!(false));
+        dag.params
+            .insert("env".to_string(), serde_json::json!("prod"));
+        dag.params
+            .insert("batch_size".to_string(), serde_json::json!(100));
+        dag.params
+            .insert("debug".to_string(), serde_json::json!(false));
 
         let json = serde_json::to_string(&dag).unwrap();
         assert!(!json.is_empty());
@@ -334,7 +376,8 @@ mod tests {
         dag1.nodes.push(python_node("a"));
 
         let mut dag2 = dag1.clone();
-        dag2.params.insert("env".to_string(), serde_json::json!("prod"));
+        dag2.params
+            .insert("env".to_string(), serde_json::json!("prod"));
 
         assert_ne!(dag1.compute_version_hash(), dag2.compute_version_hash());
     }
@@ -343,11 +386,16 @@ mod tests {
     fn dag_def_serializes_all_fields() {
         let mut dag = DagDef::new("train");
         dag.pipeline_id = "ml-pipeline".to_string();
-        dag.trigger = Trigger::Cron { schedule: "0 6 * * *".to_string() };
+        dag.trigger = Trigger::Cron {
+            schedule: "0 6 * * *".to_string(),
+        };
         dag.team = "data-eng".to_string();
         dag.user = "alice".to_string();
         dag.nodes.extend([python_node("a"), python_node("b")]);
-        dag.edges.push(Edge { from: "a".to_string(), to: "b".to_string() });
+        dag.edges.push(Edge {
+            from: "a".to_string(),
+            to: "b".to_string(),
+        });
         dag.version_hash = dag.compute_version_hash();
 
         let json = serde_json::to_string(&dag).unwrap();

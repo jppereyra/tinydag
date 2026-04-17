@@ -16,8 +16,12 @@ async fn main() {
             eprintln!("usage: tinydag <command> [args]");
             eprintln!();
             eprintln!("commands:");
-            eprintln!("  compile <pipeline.star> [--output <path>]   Compile a Starlark pipeline to a DAG");
-            eprintln!("  run <pipeline.star>                          Compile and execute a Starlark pipeline");
+            eprintln!(
+                "  compile <pipeline.star> [--output <path>]   Compile a Starlark pipeline to a DAG"
+            );
+            eprintln!(
+                "  run <pipeline.star>                          Compile and execute a Starlark pipeline"
+            );
             1
         }
     };
@@ -50,8 +54,14 @@ fn cmd_compile(args: &[String]) -> i32 {
     // Default output: <stem>.dag.json beside the input file.
     let output_path = output.unwrap_or_else(|| {
         let p = Path::new(input);
-        let stem = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        let dir = p.parent().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
+        let stem = p
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let dir = p
+            .parent()
+            .map(|d| d.to_string_lossy().into_owned())
+            .unwrap_or_default();
         if dir.is_empty() {
             format!("{stem}.dag.json")
         } else {
@@ -113,8 +123,13 @@ async fn cmd_run(args: &[String]) -> i32 {
             eprintln!("task '{node_id}' failed: {source}");
             3
         }
-        Err(RunError::DuplicateOutput { node_id, output_name }) => {
-            eprintln!("error: predecessors of '{node_id}' produce duplicate output name '{output_name}'");
+        Err(RunError::DuplicateOutput {
+            node_id,
+            output_name,
+        }) => {
+            eprintln!(
+                "error: predecessors of '{node_id}' produce duplicate output name '{output_name}'"
+            );
             3
         }
     }

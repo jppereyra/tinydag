@@ -14,10 +14,10 @@ use starlark::environment::{Globals, GlobalsBuilder, Module};
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
 use starlark::syntax::{AstModule, Dialect};
+use starlark::values::Value;
 use starlark::values::dict::DictRef;
 use starlark::values::list::ListRef;
 use starlark::values::none::NoneType;
-use starlark::values::Value;
 
 use crate::dag::{DagDef, Edge, Node, RetryPolicy, TaskRef, Trigger};
 use crate::operators::{BashOperator, Operator as _, PythonOperator};
@@ -118,13 +118,16 @@ fn unpack_string_list<'v>(v: Value<'v>, name: &str) -> anyhow::Result<Vec<String
                 None => {
                     return Err(anyhow!(
                         "'{name}' must be a list of strings, got non-string element"
-                    ))
+                    ));
                 }
             }
         }
         return Ok(result);
     }
-    Err(anyhow!("'{name}' must be a string or list of strings, got {}", v.get_type()))
+    Err(anyhow!(
+        "'{name}' must be a string or list of strings, got {}",
+        v.get_type()
+    ))
 }
 
 /// Accept a Starlark `None` or a positive integer; returns `Option<u64>`.
@@ -170,7 +173,10 @@ fn starlark_to_json<'v>(v: Value<'v>) -> anyhow::Result<serde_json::Value> {
         }
         return Ok(serde_json::Value::Object(map));
     }
-    Err(anyhow!("unsupported param value type '{}' in params dict", v.get_type()))
+    Err(anyhow!(
+        "unsupported param value type '{}' in params dict",
+        v.get_type()
+    ))
 }
 
 /// Convert a Starlark `None` or dict-with-string-keys into a JSON params map.
@@ -208,8 +214,7 @@ fn register_operator(
     // Validate against already-registered task IDs (forward references are errors).
     {
         let operators = collector.operators.borrow();
-        let known_ids: HashSet<&str> =
-            operators.iter().map(|op| op.task_id.as_str()).collect();
+        let known_ids: HashSet<&str> = operators.iter().map(|op| op.task_id.as_str()).collect();
 
         if known_ids.contains(task_id) {
             return Err(anyhow!("duplicate task_id: '{task_id}'"));
@@ -233,7 +238,12 @@ fn register_operator(
 
     {
         let mut operators = collector.operators.borrow_mut();
-        operators.push(OperatorDef { task_id: task_id.to_owned(), task_ref, retry, timeout_secs });
+        operators.push(OperatorDef {
+            task_id: task_id.to_owned(),
+            task_ref,
+            retry,
+            timeout_secs,
+        });
     }
 
     Ok(task_id.to_owned())
@@ -342,16 +352,44 @@ fn dag_globals(builder: &mut GlobalsBuilder) {
 
         let timeout = unpack_optional_u64(timeout_secs, "timeout_secs")?;
 
-        let cmd_opt = if cmd.is_none() { None } else { Some(cmd.unpack_str().ok_or_else(|| anyhow!("'cmd' must be a string"))?.to_owned()) };
-        let script_opt = if script.is_none() { None } else { Some(script.unpack_str().ok_or_else(|| anyhow!("'script' must be a string"))?.to_owned()) };
+        let cmd_opt = if cmd.is_none() {
+            None
+        } else {
+            Some(
+                cmd.unpack_str()
+                    .ok_or_else(|| anyhow!("'cmd' must be a string"))?
+                    .to_owned(),
+            )
+        };
+        let script_opt = if script.is_none() {
+            None
+        } else {
+            Some(
+                script
+                    .unpack_str()
+                    .ok_or_else(|| anyhow!("'script' must be a string"))?
+                    .to_owned(),
+            )
+        };
 
         match (&cmd_opt, &script_opt) {
-            (None, None) => return Err(anyhow!("bash_operator requires exactly one of 'cmd' or 'script'")),
-            (Some(_), Some(_)) => return Err(anyhow!("bash_operator accepts at most one of 'cmd' or 'script'")),
+            (None, None) => {
+                return Err(anyhow!(
+                    "bash_operator requires exactly one of 'cmd' or 'script'"
+                ));
+            }
+            (Some(_), Some(_)) => {
+                return Err(anyhow!(
+                    "bash_operator accepts at most one of 'cmd' or 'script'"
+                ));
+            }
             _ => {}
         }
 
-        let task_ref = TaskRef::Bash(BashOperator { cmd: cmd_opt, script: script_opt });
+        let task_ref = TaskRef::Bash(BashOperator {
+            cmd: cmd_opt,
+            script: script_opt,
+        });
         let retry = RetryPolicy {
             max_attempts: max_attempts.max(1) as u32,
             delay_secs: delay_secs.max(0) as u64,
@@ -382,7 +420,11 @@ fn eval_with_collector(
     Ok(())
 }
 
-pub(crate) fn compile_source(filename: &str, source: &str, base_dir: Option<&Path>) -> Result<DagDef, CompileError> {
+pub(crate) fn compile_source(
+    filename: &str,
+    source: &str,
+    base_dir: Option<&Path>,
+) -> Result<DagDef, CompileError> {
     let ast = AstModule::parse(filename, source.to_owned(), &Dialect::Standard)
         .map_err(|e| anyhow!("{e}"))?;
     let globals = GlobalsBuilder::new().with(dag_globals).build();
@@ -506,7 +548,12 @@ dag("d", schedule="0 6 * * *")
 bash_operator("n", cmd="echo hi")
 "#;
         let dag = compile_source("test.star", src, None).unwrap();
-        assert_eq!(dag.trigger, Trigger::Cron { schedule: "0 6 * * *".to_owned() });
+        assert_eq!(
+            dag.trigger,
+            Trigger::Cron {
+                schedule: "0 6 * * *".to_owned()
+            }
+        );
     }
 
     #[test]
@@ -606,5 +653,4 @@ bash_operator("b", cmd="echo b", depends_on="nonexistent")
 "#;
         assert!(compile_source("test.star", src, None).is_err());
     }
-
 }

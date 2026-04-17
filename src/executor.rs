@@ -8,7 +8,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use opentelemetry::{global, KeyValue};
+use opentelemetry::{KeyValue, global};
 use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
@@ -80,20 +80,32 @@ pub struct TaskOutcome {
     pub exit_code: Option<i32>,
 }
 
-
 #[derive(Debug, Error)]
 pub enum ExecutorError {
     #[error("node '{node_id}': task failed (exit {code}): {stderr}")]
-    TaskFailed { node_id: NodeId, code: i32, stderr: String },
+    TaskFailed {
+        node_id: NodeId,
+        code: i32,
+        stderr: String,
+    },
 
     #[error("node '{node_id}': task timed out after {timeout_secs}s")]
     TaskTimedOut { node_id: NodeId, timeout_secs: u64 },
 
     #[error("node '{node_id}': failed to spawn operator binary '{binary}': {source}")]
-    SpawnFailed { node_id: NodeId, binary: String, #[source] source: std::io::Error },
+    SpawnFailed {
+        node_id: NodeId,
+        binary: String,
+        #[source]
+        source: std::io::Error,
+    },
 
     #[error("node '{node_id}': failed to write dispatch payload to operator stdin: {source}")]
-    StdinFailed { node_id: NodeId, #[source] source: std::io::Error },
+    StdinFailed {
+        node_id: NodeId,
+        #[source]
+        source: std::io::Error,
+    },
 
     #[error("node '{node_id}': failed to parse operator stdout as JSON: {reason}")]
     OutputParseFailed { node_id: NodeId, reason: String },
@@ -140,8 +152,7 @@ impl LocalExecutor {
             .iter()
             .map(|&op| {
                 let env_key = format!("TINYDAG_OP_{}", op.to_uppercase());
-                let binary = std::env::var(&env_key)
-                    .unwrap_or_else(|_| format!("tinydag-op-{op}"));
+                let binary = std::env::var(&env_key).unwrap_or_else(|_| format!("tinydag-op-{op}"));
                 (op.to_string(), binary)
             })
             .collect();
@@ -150,7 +161,11 @@ impl LocalExecutor {
                 .await
                 .expect("failed to start gRPC control server"),
         );
-        LocalExecutor { registry, heartbeat_timeout_secs: 90, control_server }
+        LocalExecutor {
+            registry,
+            heartbeat_timeout_secs: 90,
+            control_server,
+        }
     }
 
     /// Build a `LocalExecutor` with an explicit registry.
@@ -161,7 +176,11 @@ impl LocalExecutor {
                 .await
                 .expect("failed to start gRPC control server"),
         );
-        LocalExecutor { registry, heartbeat_timeout_secs: 90, control_server }
+        LocalExecutor {
+            registry,
+            heartbeat_timeout_secs: 90,
+            control_server,
+        }
     }
 }
 
@@ -180,26 +199,30 @@ impl Executor for LocalExecutor {
         let start = Instant::now();
         let operator = payload.task_ref.type_name();
 
-        let binary = self.registry.get(operator).ok_or_else(|| {
-            ExecutorError::UnregisteredOperator {
-                node_id:  payload.node_id.clone(),
+        let binary = self
+            .registry
+            .get(operator)
+            .ok_or_else(|| ExecutorError::UnregisteredOperator {
+                node_id: payload.node_id.clone(),
                 operator: operator.to_string(),
-            }
-        })?.to_string();
+            })?
+            .to_string();
 
         let result = self.spawn_operator(&binary, &payload).await;
 
         global::meter("tinydag")
             .f64_histogram("tinydag.task.duration")
             .with_unit("s")
-            .with_description("Duration of a single task dispatch including operator subprocess lifetime")
+            .with_description(
+                "Duration of a single task dispatch including operator subprocess lifetime",
+            )
             .build()
             .record(
                 start.elapsed().as_secs_f64(),
                 &[
-                    KeyValue::new("dag.id",        payload.dag_id.clone()),
-                    KeyValue::new("node.id",        payload.node_id.clone()),
-                    KeyValue::new("operator.type",  operator),
+                    KeyValue::new("dag.id", payload.dag_id.clone()),
+                    KeyValue::new("node.id", payload.node_id.clone()),
+                    KeyValue::new("operator.type", operator),
                     KeyValue::new("result", if result.is_ok() { "success" } else { "failure" }),
                 ],
             );
@@ -216,14 +239,13 @@ impl LocalExecutor {
     ) -> Result<TaskOutcome, ExecutorError> {
         use crate::control_server::ControlEvent;
 
-        let stdin_json = serde_json::to_string(payload)
-            .expect("DispatchPayload serialization should not fail");
+        let stdin_json =
+            serde_json::to_string(payload).expect("DispatchPayload serialization should not fail");
 
         // Register before spawning — guard removes the entry on drop.
-        let (mut event_rx, _task_guard) = self.control_server.register(
-            payload.run_id.clone(),
-            payload.node_id.clone(),
-        );
+        let (mut event_rx, _task_guard) = self
+            .control_server
+            .register(payload.run_id.clone(), payload.node_id.clone());
 
         let mut child = Command::new(binary)
             .stdin(Stdio::piped())
@@ -233,14 +255,17 @@ impl LocalExecutor {
             .spawn()
             .map_err(|e| ExecutorError::SpawnFailed {
                 node_id: payload.node_id.clone(),
-                binary:  binary.to_string(),
-                source:  e,
+                binary: binary.to_string(),
+                source: e,
             })?;
 
         {
             let mut stdin = child.stdin.take().unwrap();
             stdin.write_all(stdin_json.as_bytes()).await.map_err(|e| {
-                ExecutorError::StdinFailed { node_id: payload.node_id.clone(), source: e }
+                ExecutorError::StdinFailed {
+                    node_id: payload.node_id.clone(),
+                    source: e,
+                }
             })?;
         }
 
@@ -275,43 +300,45 @@ impl LocalExecutor {
                         serde_json::from_str(&outputs_json).map_err(|e| {
                             ExecutorError::OutputParseFailed {
                                 node_id: payload.node_id.clone(),
-                                reason:  format!("invalid outputs JSON in SucceededEvent: {e}"),
+                                reason: format!("invalid outputs JSON in SucceededEvent: {e}"),
                             }
                         })?
                     };
 
                     return Ok(TaskOutcome {
-                        node_id:   payload.node_id.clone(),
+                        node_id: payload.node_id.clone(),
                         outputs,
                         exit_code: Some(0),
                     });
                 }
 
-                Ok(Some(ControlEvent::Failed { error_type, message, exit_code })) => {
+                Ok(Some(ControlEvent::Failed {
+                    error_type,
+                    message,
+                    exit_code,
+                })) => {
                     use crate::control_server::proto::FailedErrorType;
                     let _ = child.wait().await;
 
                     if error_type == FailedErrorType::InvalidOutput {
                         return Err(ExecutorError::OutputParseFailed {
                             node_id: payload.node_id.clone(),
-                            reason:  message,
+                            reason: message,
                         });
                     }
                     return Err(ExecutorError::TaskFailed {
                         node_id: payload.node_id.clone(),
-                        code:    exit_code,
-                        stderr:  String::new(),
+                        code: exit_code,
+                        stderr: String::new(),
                     });
                 }
 
                 Err(_elapsed) => {
                     let _ = child.start_kill();
                     let _ = child.wait().await;
-                    let timeout_secs = payload
-                        .timeout_secs
-                        .unwrap_or(self.heartbeat_timeout_secs);
+                    let timeout_secs = payload.timeout_secs.unwrap_or(self.heartbeat_timeout_secs);
                     return Err(ExecutorError::TaskTimedOut {
-                        node_id:      payload.node_id.clone(),
+                        node_id: payload.node_id.clone(),
                         timeout_secs,
                     });
                 }
@@ -320,8 +347,8 @@ impl LocalExecutor {
                     let _ = child.wait().await;
                     return Err(ExecutorError::SpawnFailed {
                         node_id: payload.node_id.clone(),
-                        binary:  binary.to_string(),
-                        source:  std::io::Error::other("control server channel unexpectedly closed"),
+                        binary: binary.to_string(),
+                        source: std::io::Error::other("control server channel unexpectedly closed"),
                     });
                 }
             }
@@ -333,7 +360,7 @@ impl LocalExecutor {
                 let _ = child.start_kill();
                 let _ = child.wait().await;
                 return Err(ExecutorError::TaskTimedOut {
-                    node_id:      payload.node_id.clone(),
+                    node_id: payload.node_id.clone(),
                     timeout_secs: t,
                 });
             }
@@ -362,8 +389,10 @@ mod tests {
         // test binary  → target/debug/deps/<name>
         // op binary    → target/debug/tinydag-op-bash
         let binary = test_bin
-            .parent().unwrap()  // …/deps
-            .parent().unwrap()  // …/debug
+            .parent()
+            .unwrap() // …/deps
+            .parent()
+            .unwrap() // …/debug
             .join("tinydag-op-bash");
         let mut registry = HashMap::new();
         registry.insert("bash".to_string(), binary.to_string_lossy().into_owned());
@@ -373,17 +402,20 @@ mod tests {
     /// Build a bash dispatch payload whose cmd drives the operator's behaviour.
     fn bash_payload(id: &str, cmd: &str, timeout: Option<u64>) -> DispatchPayload {
         DispatchPayload {
-            run_id:       "run-1".to_string(),
-            dag_id:       "test-dag".to_string(),
-            pipeline_id:  "test-pipeline".to_string(),
-            dag_version:  "abc123".to_string(),
-            team:         "test-team".to_string(),
-            user:         "test-user".to_string(),
+            run_id: "run-1".to_string(),
+            dag_id: "test-dag".to_string(),
+            pipeline_id: "test-pipeline".to_string(),
+            dag_version: "abc123".to_string(),
+            team: "test-team".to_string(),
+            user: "test-user".to_string(),
             trigger_type: "manual".to_string(),
-            node_id:      id.to_string(),
-            task_ref:     TaskRef::Bash(BashOperator { cmd: Some(cmd.to_string()), script: None }),
-            inputs:       HashMap::new(),
-            dag_params:   HashMap::new(),
+            node_id: id.to_string(),
+            task_ref: TaskRef::Bash(BashOperator {
+                cmd: Some(cmd.to_string()),
+                script: None,
+            }),
+            inputs: HashMap::new(),
+            dag_params: HashMap::new(),
             timeout_secs: timeout,
         }
     }
@@ -392,7 +424,11 @@ mod tests {
     async fn successful_operator_returns_outputs() {
         let ex = bash_executor().await;
         let outcome = ex
-            .dispatch(bash_payload("node-1", r#"printf '{"outputs":{"x":42}}'"#, None))
+            .dispatch(bash_payload(
+                "node-1",
+                r#"printf '{"outputs":{"x":42}}'"#,
+                None,
+            ))
             .await
             .unwrap();
         assert_eq!(outcome.node_id, "node-1");
@@ -403,7 +439,10 @@ mod tests {
     #[tokio::test]
     async fn empty_stdout_is_valid() {
         let ex = bash_executor().await;
-        let outcome = ex.dispatch(bash_payload("node-1", ":", None)).await.unwrap();
+        let outcome = ex
+            .dispatch(bash_payload("node-1", ":", None))
+            .await
+            .unwrap();
         assert!(outcome.outputs.is_empty());
     }
 
@@ -424,7 +463,13 @@ mod tests {
             .dispatch(bash_payload("node-1", "sleep 60", Some(1)))
             .await
             .unwrap_err();
-        assert!(matches!(err, ExecutorError::TaskTimedOut { timeout_secs: 1, .. }));
+        assert!(matches!(
+            err,
+            ExecutorError::TaskTimedOut {
+                timeout_secs: 1,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -463,7 +508,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(outcome.outputs["result"], serde_json::json!("hello"));
-        assert_eq!(outcome.outputs["n"],      serde_json::json!(7));
+        assert_eq!(outcome.outputs["n"], serde_json::json!(7));
     }
 
     /// Round-trip: a failing task returns TaskFailed via gRPC.
@@ -496,7 +541,12 @@ mod tests {
         use std::process::Command;
 
         let test_bin = std::env::current_exe().expect("can't locate test binary");
-        let binary = test_bin.parent().unwrap().parent().unwrap().join("tinydag-op-bash");
+        let binary = test_bin
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("tinydag-op-bash");
 
         let payload = bash_payload("node-1", "echo hi", None);
         let stdin_json = serde_json::to_string(&payload).unwrap();
@@ -509,12 +559,19 @@ mod tests {
             .spawn()
             .and_then(|mut child| {
                 use std::io::Write;
-                child.stdin.take().unwrap().write_all(stdin_json.as_bytes()).unwrap();
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(stdin_json.as_bytes())
+                    .unwrap();
                 child.wait_with_output()
             })
             .unwrap();
 
-        assert!(!output.status.success(), "should exit non-zero without endpoint");
+        assert!(
+            !output.status.success(),
+            "should exit non-zero without endpoint"
+        );
     }
-
 }

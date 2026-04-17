@@ -6,7 +6,7 @@
 use std::io::Read as _;
 use std::path::Path;
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tonic::transport::Channel;
@@ -43,11 +43,11 @@ extern "C" fn handle_sigterm(_: libc::c_int) {
 // ---------------------------------------------------------------------------
 
 struct GrpcSession {
-    rt:               Arc<tokio::runtime::Runtime>,
-    client:           OperatorControlClient<Channel>,
-    run_id:           String,
-    task_id:          String,
-    heartbeat_stop:   mpsc::SyncSender<()>,
+    rt: Arc<tokio::runtime::Runtime>,
+    client: OperatorControlClient<Channel>,
+    run_id: String,
+    task_id: String,
+    heartbeat_stop: mpsc::SyncSender<()>,
     heartbeat_thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -81,23 +81,25 @@ impl GrpcSession {
         let hb_run_id = run_id.clone();
         let hb_task_id = task_id.clone();
 
-        let heartbeat_thread = std::thread::spawn(move || loop {
-            match stop_rx.recv_timeout(Duration::from_secs(30)) {
-                Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    let ts = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs() as i64;
-                    let _ = rt2.block_on(async {
-                        hb_client
-                            .report_heartbeat(HeartbeatEvent {
-                                run_id: hb_run_id.clone(),
-                                task_id: hb_task_id.clone(),
-                                timestamp_unix_secs: ts,
-                            })
-                            .await
-                    });
+        let heartbeat_thread = std::thread::spawn(move || {
+            loop {
+                match stop_rx.recv_timeout(Duration::from_secs(30)) {
+                    Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        let ts = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+                        let _ = rt2.block_on(async {
+                            hb_client
+                                .report_heartbeat(HeartbeatEvent {
+                                    run_id: hb_run_id.clone(),
+                                    task_id: hb_task_id.clone(),
+                                    timestamp_unix_secs: ts,
+                                })
+                                .await
+                        });
+                    }
                 }
             }
         });
@@ -208,7 +210,10 @@ where
 {
     // 1. Register SIGTERM handler.
     unsafe {
-        libc::signal(libc::SIGTERM, handle_sigterm as *const () as libc::sighandler_t);
+        libc::signal(
+            libc::SIGTERM,
+            handle_sigterm as *const () as libc::sighandler_t,
+        );
     }
 
     // 2. Read + parse stdin.
@@ -234,8 +239,10 @@ where
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .subsec_nanos();
-    let work_dir = std::env::temp_dir()
-        .join(format!("tinydag-work-{node_id}-{}-{nanos}", std::process::id()));
+    let work_dir = std::env::temp_dir().join(format!(
+        "tinydag-work-{node_id}-{}-{nanos}",
+        std::process::id()
+    ));
     if let Err(e) = std::fs::create_dir_all(&work_dir) {
         eprintln!("{operator_name}: failed to create work dir: {e}");
         std::process::exit(1);
@@ -252,8 +259,8 @@ where
     };
 
     // 6. Connect and report started.
-    let mut session =
-        GrpcSession::connect_and_start(endpoint, run_id, node_id.clone()).unwrap_or_else(|e| {
+    let mut session = GrpcSession::connect_and_start(endpoint, run_id, node_id.clone())
+        .unwrap_or_else(|e| {
             let _ = std::fs::remove_dir_all(&work_dir);
             eprintln!("{operator_name}: failed to connect to control server: {e}");
             std::process::exit(1);

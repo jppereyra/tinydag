@@ -8,12 +8,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use opentelemetry::{global, KeyValue};
+use opentelemetry::{KeyValue, global};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::executor::{DispatchPayload, Executor, ExecutorError, TaskOutcome};
 use crate::dag::{DagDef, NodeId, Trigger};
+use crate::executor::{DispatchPayload, Executor, ExecutorError, TaskOutcome};
 use crate::operators::Operator;
 
 // ---------------------------------------------------------------------------
@@ -46,8 +46,13 @@ pub enum RunError {
         source: ExecutorError,
     },
 
-    #[error("cannot dispatch '{node_id}': predecessor outputs contain duplicate output name '{output_name}'")]
-    DuplicateOutput { node_id: NodeId, output_name: String },
+    #[error(
+        "cannot dispatch '{node_id}': predecessor outputs contain duplicate output name '{output_name}'"
+    )]
+    DuplicateOutput {
+        node_id: NodeId,
+        output_name: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -76,7 +81,7 @@ pub async fn run(config: RunConfig) -> Result<RunOutcome, RunError> {
     let result = run_inner(run_id, config).await;
 
     let (status, dag_id) = match &result {
-        Ok(o)  => ("success",  o.dag_id.clone()),
+        Ok(o) => ("success", o.dag_id.clone()),
         Err(_) => ("failure", "<unknown>".to_string()),
     };
 
@@ -108,7 +113,10 @@ async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunE
 
     for edge in &dag.edges {
         *in_degree.get_mut(edge.to.as_str()).unwrap() += 1;
-        successors.get_mut(edge.from.as_str()).unwrap().push(edge.to.as_str());
+        successors
+            .get_mut(edge.from.as_str())
+            .unwrap()
+            .push(edge.to.as_str());
     }
 
     // Seed with nodes that have no dependencies.
@@ -135,9 +143,7 @@ async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunE
         .u64_counter("tinydag.run.tasks_failed")
         .with_description("Number of tasks that failed in a DAG run")
         .build();
-    let run_attrs = [
-        KeyValue::new("dag.id", dag.dag_id.clone()),
-    ];
+    let run_attrs = [KeyValue::new("dag.id", dag.dag_id.clone())];
 
     loop {
         // Dispatch all currently-ready nodes.
@@ -148,7 +154,9 @@ async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunE
             // Duplicate output names across predecessors are a hard error.
             let mut inputs: HashMap<String, Value> = HashMap::new();
             for edge in dag.edges.iter().filter(|e| e.to == node_id) {
-                for (output_name, value) in outputs.get(edge.from.as_str()).cloned().unwrap_or_default() {
+                for (output_name, value) in
+                    outputs.get(edge.from.as_str()).cloned().unwrap_or_default()
+                {
                     if inputs.contains_key(&output_name) {
                         // Drain in-flight before returning so tasks don't leak.
                         for _ in 0..in_flight {
@@ -218,7 +226,10 @@ async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunE
                     let _ = rx.recv().await;
                 }
 
-                return Err(RunError::TaskFailed { node_id, source: error });
+                return Err(RunError::TaskFailed {
+                    node_id,
+                    source: error,
+                });
             }
 
             Ok(outcome) => {
@@ -272,9 +283,9 @@ async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunE
 
 fn trigger_type_str(trigger: &Trigger) -> &'static str {
     match trigger {
-        Trigger::Manual                    => "manual",
-        Trigger::Cron { .. }               => "cron",
-        Trigger::Event { .. }              => "event",
+        Trigger::Manual => "manual",
+        Trigger::Cron { .. } => "cron",
+        Trigger::Event { .. } => "event",
         Trigger::PipelineCompletion { .. } => "pipeline_completion",
     }
 }
@@ -290,14 +301,16 @@ fn make_run_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::executor::LocalExecutor;
     use crate::dag::DagDef;
+    use crate::executor::LocalExecutor;
 
     async fn bash_executor() -> Arc<dyn Executor> {
         let test_bin = std::env::current_exe().expect("can't locate test binary");
         let binary = test_bin
-            .parent().unwrap()  // …/deps
-            .parent().unwrap()  // …/debug
+            .parent()
+            .unwrap() // …/deps
+            .parent()
+            .unwrap() // …/debug
             .join("tinydag-op-bash");
         let mut registry = HashMap::new();
         registry.insert("bash".to_string(), binary.to_string_lossy().into_owned());
@@ -310,33 +323,54 @@ mod tests {
 
     #[tokio::test]
     async fn single_successful_task() {
-        let dag = compile_dag(r#"
+        let dag = compile_dag(
+            r#"
 dag("test")
 bash_operator("a", cmd="printf '{\"outputs\":{}}'  ")
-"#);
-        let outcome = run(RunConfig { dag, executor: bash_executor().await }).await.unwrap();
+"#,
+        );
+        let outcome = run(RunConfig {
+            dag,
+            executor: bash_executor().await,
+        })
+        .await
+        .unwrap();
         assert_eq!(outcome.succeeded, vec!["a"]);
     }
 
     #[tokio::test]
     async fn failing_task_returns_run_error() {
-        let dag = compile_dag(r#"
+        let dag = compile_dag(
+            r#"
 dag("test")
 bash_operator("a", cmd="exit 1")
-"#);
-        let err = run(RunConfig { dag, executor: bash_executor().await }).await.unwrap_err();
+"#,
+        );
+        let err = run(RunConfig {
+            dag,
+            executor: bash_executor().await,
+        })
+        .await
+        .unwrap_err();
         assert!(matches!(err, RunError::TaskFailed { node_id, .. } if node_id == "a"));
     }
 
     #[tokio::test]
     async fn linear_chain_runs_in_order() {
-        let dag = compile_dag(r#"
+        let dag = compile_dag(
+            r#"
 dag("chain")
 a = bash_operator("a", cmd="printf '{\"outputs\":{}}'  ")
 b = bash_operator("b", cmd="printf '{\"outputs\":{}}'  ", depends_on=a)
 bash_operator("c", cmd="printf '{\"outputs\":{}}'  ", depends_on=b)
-"#);
-        let outcome = run(RunConfig { dag, executor: bash_executor().await }).await.unwrap();
+"#,
+        );
+        let outcome = run(RunConfig {
+            dag,
+            executor: bash_executor().await,
+        })
+        .await
+        .unwrap();
         assert_eq!(outcome.succeeded.len(), 3);
         let pos: HashMap<&str, usize> = outcome
             .succeeded
@@ -351,14 +385,21 @@ bash_operator("c", cmd="printf '{\"outputs\":{}}'  ", depends_on=b)
     #[tokio::test]
     async fn diamond_dag_all_nodes_complete() {
         // a -> b, a -> c, b -> d, c -> d
-        let dag = compile_dag(r#"
+        let dag = compile_dag(
+            r#"
 dag("diamond")
 a = bash_operator("a", cmd="printf '{\"outputs\":{}}'  ")
 b = bash_operator("b", cmd="printf '{\"outputs\":{}}'  ", depends_on=a)
 c = bash_operator("c", cmd="printf '{\"outputs\":{}}'  ", depends_on=a)
 bash_operator("d", cmd="printf '{\"outputs\":{}}'  ", depends_on=[b, c])
-"#);
-        let outcome = run(RunConfig { dag, executor: bash_executor().await }).await.unwrap();
+"#,
+        );
+        let outcome = run(RunConfig {
+            dag,
+            executor: bash_executor().await,
+        })
+        .await
+        .unwrap();
         assert_eq!(outcome.succeeded.len(), 4);
         let pos: HashMap<&str, usize> = outcome
             .succeeded
@@ -375,13 +416,20 @@ bash_operator("d", cmd="printf '{\"outputs\":{}}'  ", depends_on=[b, c])
     #[tokio::test]
     async fn duplicate_output_name_is_an_error() {
         // a and b both produce name "x"; c depends on both — should fail.
-        let dag = compile_dag(r#"
+        let dag = compile_dag(
+            r#"
 dag("dup")
 a = bash_operator("a", cmd="printf '{\"outputs\":{\"x\":1}}'")
 b = bash_operator("b", cmd="printf '{\"outputs\":{\"x\":2}}'")
 bash_operator("c", cmd="printf '{\"outputs\":{}}'  ", depends_on=[a, b])
-"#);
-        let err = run(RunConfig { dag, executor: bash_executor().await }).await.unwrap_err();
+"#,
+        );
+        let err = run(RunConfig {
+            dag,
+            executor: bash_executor().await,
+        })
+        .await
+        .unwrap_err();
         assert!(
             matches!(&err, RunError::DuplicateOutput { node_id, output_name }
                 if node_id == "c" && output_name == "x"),
@@ -392,13 +440,20 @@ bash_operator("c", cmd="printf '{\"outputs\":{}}'  ", depends_on=[a, b])
     #[tokio::test]
     async fn distinct_output_names_from_multiple_predecessors_merge_cleanly() {
         // a produces "x", b produces "y"; c depends on both — no collision.
-        let dag = compile_dag(r#"
+        let dag = compile_dag(
+            r#"
 dag("merge")
 a = bash_operator("a", cmd="printf '{\"outputs\":{\"x\":1}}'")
 b = bash_operator("b", cmd="printf '{\"outputs\":{\"y\":2}}'")
 bash_operator("c", cmd="printf '{\"outputs\":{}}'  ", depends_on=[a, b])
-"#);
-        let outcome = run(RunConfig { dag, executor: bash_executor().await }).await.unwrap();
+"#,
+        );
+        let outcome = run(RunConfig {
+            dag,
+            executor: bash_executor().await,
+        })
+        .await
+        .unwrap();
         assert_eq!(outcome.succeeded.len(), 3);
     }
 }

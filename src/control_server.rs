@@ -16,7 +16,7 @@ pub mod proto {
 
 use proto::operator_control_server::{OperatorControl, OperatorControlServer};
 use proto::{Ack, FailedEvent, HeartbeatEvent, StartedEvent, SucceededEvent};
-use tonic::{transport::Server, Request, Response, Status};
+use tonic::{Request, Response, Status, transport::Server};
 
 // ---------------------------------------------------------------------------
 // Public event types
@@ -27,8 +27,14 @@ use tonic::{transport::Server, Request, Response, Status};
 pub enum ControlEvent {
     Started,
     Heartbeat,
-    Succeeded { outputs_json: String },
-    Failed { error_type: proto::FailedErrorType, message: String, exit_code: i32 },
+    Succeeded {
+        outputs_json: String,
+    },
+    Failed {
+        error_type: proto::FailedErrorType,
+        message: String,
+        exit_code: i32,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -44,13 +50,14 @@ type Senders = Arc<DashMap<(String, String), tokio::sync::mpsc::Sender<ControlEv
 /// Prevents sender map leaks on cancellation or early return.
 pub struct TaskGuard {
     senders: Senders,
-    run_id:  String,
+    run_id: String,
     task_id: String,
 }
 
 impl Drop for TaskGuard {
     fn drop(&mut self) {
-        self.senders.remove(&(self.run_id.clone(), self.task_id.clone()));
+        self.senders
+            .remove(&(self.run_id.clone(), self.task_id.clone()));
     }
 }
 
@@ -66,7 +73,8 @@ struct GrpcService {
 impl GrpcService {
     async fn route(&self, run_id: &str, task_id: &str, event: ControlEvent) {
         // Clone the sender to release the DashMap shard lock before awaiting.
-        let tx = self.senders
+        let tx = self
+            .senders
             .get(&(run_id.to_string(), task_id.to_string()))
             .map(|r| r.clone());
         if let Some(tx) = tx {
@@ -77,12 +85,10 @@ impl GrpcService {
 
 #[tonic::async_trait]
 impl OperatorControl for GrpcService {
-    async fn report_started(
-        &self,
-        req: Request<StartedEvent>,
-    ) -> Result<Response<Ack>, Status> {
+    async fn report_started(&self, req: Request<StartedEvent>) -> Result<Response<Ack>, Status> {
         let e = req.into_inner();
-        self.route(&e.run_id, &e.task_id, ControlEvent::Started).await;
+        self.route(&e.run_id, &e.task_id, ControlEvent::Started)
+            .await;
         Ok(Response::new(Ack {}))
     }
 
@@ -91,7 +97,8 @@ impl OperatorControl for GrpcService {
         req: Request<HeartbeatEvent>,
     ) -> Result<Response<Ack>, Status> {
         let e = req.into_inner();
-        self.route(&e.run_id, &e.task_id, ControlEvent::Heartbeat).await;
+        self.route(&e.run_id, &e.task_id, ControlEvent::Heartbeat)
+            .await;
         Ok(Response::new(Ack {}))
     }
 
@@ -103,15 +110,15 @@ impl OperatorControl for GrpcService {
         self.route(
             &e.run_id,
             &e.task_id,
-            ControlEvent::Succeeded { outputs_json: e.outputs_json },
-        ).await;
+            ControlEvent::Succeeded {
+                outputs_json: e.outputs_json,
+            },
+        )
+        .await;
         Ok(Response::new(Ack {}))
     }
 
-    async fn report_failed(
-        &self,
-        req: Request<FailedEvent>,
-    ) -> Result<Response<Ack>, Status> {
+    async fn report_failed(&self, req: Request<FailedEvent>) -> Result<Response<Ack>, Status> {
         let e = req.into_inner();
         let error_type = proto::FailedErrorType::try_from(e.error_type)
             .unwrap_or(proto::FailedErrorType::Unspecified);
@@ -123,7 +130,8 @@ impl OperatorControl for GrpcService {
                 message: e.message,
                 exit_code: e.exit_code,
             },
-        ).await;
+        )
+        .await;
         Ok(Response::new(Ack {}))
     }
 }
@@ -134,14 +142,15 @@ impl OperatorControl for GrpcService {
 
 pub struct ControlServer {
     endpoint: String,
-    senders:  Senders,
+    senders: Senders,
 }
 
 impl ControlServer {
-
     pub async fn start() -> std::io::Result<Self> {
         let senders: Senders = Arc::new(DashMap::new());
-        let svc = GrpcService { senders: Arc::clone(&senders) };
+        let svc = GrpcService {
+            senders: Arc::clone(&senders),
+        };
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
@@ -149,9 +158,7 @@ impl ControlServer {
         tokio::task::spawn(async move {
             Server::builder()
                 .add_service(OperatorControlServer::new(svc))
-                .serve_with_incoming(
-                    tokio_stream::wrappers::TcpListenerStream::new(listener),
-                )
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
                 .await
                 .expect("control server: serve failed");
         });

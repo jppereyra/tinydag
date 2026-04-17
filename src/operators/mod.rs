@@ -22,4 +22,4 @@ pub trait Operator {
 
 pub use bash::BashOperator;
 pub use python::PythonOperator;
-pub use runtime::{parse_outputs_json, run_operator, scalar_str, FailedErrorType, CHILD_PGID};
+pub use runtime::{CHILD_PGID, FailedErrorType, parse_outputs_json, run_operator, scalar_str};

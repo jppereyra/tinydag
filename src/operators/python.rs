@@ -69,12 +69,16 @@ pub fn run() -> ! {
     use std::process::{Command, Stdio};
     use std::sync::atomic::Ordering;
 
-    use super::{parse_outputs_json, run_operator, scalar_str, FailedErrorType, CHILD_PGID};
+    use super::{CHILD_PGID, FailedErrorType, parse_outputs_json, run_operator, scalar_str};
 
     run_operator("python", |payload, work_dir| {
-        let script = payload["task_ref"]["script"]
-            .as_str()
-            .ok_or_else(|| (FailedErrorType::Unspecified, "missing script in python config".into(), 1))?;
+        let script = payload["task_ref"]["script"].as_str().ok_or_else(|| {
+            (
+                FailedErrorType::Unspecified,
+                "missing script in python config".into(),
+                1,
+            )
+        })?;
 
         let empty = serde_json::Map::new();
         let inputs = payload["inputs"].as_object().unwrap_or(&empty);
@@ -97,12 +101,18 @@ pub fn run() -> ! {
         py.arg(script).current_dir(work_dir).stdout(Stdio::piped());
         for (k, v) in inputs {
             if let Some(s) = scalar_str(v) {
-                py.env(format!("TINYDAG_INPUT_{}", k.to_uppercase().replace('-', "_")), s);
+                py.env(
+                    format!("TINYDAG_INPUT_{}", k.to_uppercase().replace('-', "_")),
+                    s,
+                );
             }
         }
         for (k, v) in params {
             if let Some(s) = scalar_str(v) {
-                py.env(format!("TINYDAG_PARAM_{}", k.to_uppercase().replace('-', "_")), s);
+                py.env(
+                    format!("TINYDAG_PARAM_{}", k.to_uppercase().replace('-', "_")),
+                    s,
+                );
             }
         }
 
@@ -112,14 +122,24 @@ pub fn run() -> ! {
                 Ok(())
             })
             .spawn()
-            .map_err(|e| (FailedErrorType::Unspecified, format!("failed to spawn {python}: {e}"), 1))?
+            .map_err(|e| {
+                (
+                    FailedErrorType::Unspecified,
+                    format!("failed to spawn {python}: {e}"),
+                    1,
+                )
+            })?
         };
         CHILD_PGID.store(child.id() as i32, Ordering::SeqCst);
         let output = child.wait_with_output().map_err(io_err)?;
 
         if !output.status.success() {
             let code = output.status.code().unwrap_or(-1);
-            return Err((FailedErrorType::Unspecified, format!("python exited {code}"), code));
+            return Err((
+                FailedErrorType::Unspecified,
+                format!("python exited {code}"),
+                code,
+            ));
         }
         parse_outputs_json(&output.stdout)
     })
@@ -143,8 +163,8 @@ mod tests {
     /// Write a temp `.py` script and return its absolute path.
     fn write_script(content: &str) -> std::path::PathBuf {
         let seq = SYNTAX_CHECK_SEQ.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir()
-            .join(format!("tinydag_py_run_{}_{}.py", std::process::id(), seq));
+        let path =
+            std::env::temp_dir().join(format!("tinydag_py_run_{}_{}.py", std::process::id(), seq));
         std::fs::write(&path, content).expect("write temp python script");
         path
     }
@@ -153,8 +173,10 @@ mod tests {
         use std::collections::HashMap;
         let test_bin = std::env::current_exe().expect("can't locate test binary");
         let binary = test_bin
-            .parent().unwrap()
-            .parent().unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
             .join("tinydag-op-python");
         let mut registry = HashMap::new();
         registry.insert("python".to_string(), binary.to_string_lossy().into_owned());
@@ -173,17 +195,17 @@ mod tests {
     ) -> crate::executor::DispatchPayload {
         use crate::dag::TaskRef;
         crate::executor::DispatchPayload {
-            run_id:       "run-1".to_string(),
-            dag_id:       "test-dag".to_string(),
-            pipeline_id:  "test-pipeline".to_string(),
-            dag_version:  "abc123".to_string(),
-            team:         "test-team".to_string(),
-            user:         "test-user".to_string(),
+            run_id: "run-1".to_string(),
+            dag_id: "test-dag".to_string(),
+            pipeline_id: "test-pipeline".to_string(),
+            dag_version: "abc123".to_string(),
+            team: "test-team".to_string(),
+            user: "test-user".to_string(),
             trigger_type: "manual".to_string(),
-            node_id:      node_id.to_string(),
-            task_ref:     TaskRef::Python(PythonOperator {
-                script:  script.to_string(),
-                inputs:  vec![],
+            node_id: node_id.to_string(),
+            task_ref: TaskRef::Python(PythonOperator {
+                script: script.to_string(),
+                inputs: vec![],
                 outputs: vec![],
             }),
             inputs,
@@ -197,7 +219,10 @@ mod tests {
         use crate::executor::Executor as _;
         let script = write_script("import json; print(json.dumps({'outputs':{'result':99}}))\n");
         let ex = python_executor().await;
-        let outcome = ex.dispatch(python_payload("py-1", &script.to_string_lossy())).await.unwrap();
+        let outcome = ex
+            .dispatch(python_payload("py-1", &script.to_string_lossy()))
+            .await
+            .unwrap();
         assert_eq!(outcome.exit_code, Some(0));
         assert_eq!(outcome.outputs["result"], serde_json::json!(99));
     }
@@ -207,7 +232,10 @@ mod tests {
         use crate::executor::Executor as _;
         let script = write_script("pass\n");
         let ex = python_executor().await;
-        let outcome = ex.dispatch(python_payload("py-1", &script.to_string_lossy())).await.unwrap();
+        let outcome = ex
+            .dispatch(python_payload("py-1", &script.to_string_lossy()))
+            .await
+            .unwrap();
         assert!(outcome.outputs.is_empty());
     }
 
@@ -216,7 +244,10 @@ mod tests {
         use crate::executor::{Executor as _, ExecutorError};
         let script = write_script("import sys; sys.exit(7)\n");
         let ex = python_executor().await;
-        let err = ex.dispatch(python_payload("py-1", &script.to_string_lossy())).await.unwrap_err();
+        let err = ex
+            .dispatch(python_payload("py-1", &script.to_string_lossy()))
+            .await
+            .unwrap_err();
         assert!(matches!(err, ExecutorError::TaskFailed { code: 7, .. }));
     }
 
@@ -230,7 +261,12 @@ mod tests {
         inputs.insert("my-key".to_string(), serde_json::json!("hello"));
         let ex = python_executor().await;
         let outcome = ex
-            .dispatch(python_payload_with("py-1", &script.to_string_lossy(), inputs, Default::default()))
+            .dispatch(python_payload_with(
+                "py-1",
+                &script.to_string_lossy(),
+                inputs,
+                Default::default(),
+            ))
             .await
             .unwrap();
         assert_eq!(outcome.outputs["v"], serde_json::json!("hello"));
@@ -246,7 +282,12 @@ mod tests {
         params.insert("env".to_string(), serde_json::json!("prod"));
         let ex = python_executor().await;
         let outcome = ex
-            .dispatch(python_payload_with("py-1", &script.to_string_lossy(), Default::default(), params))
+            .dispatch(python_payload_with(
+                "py-1",
+                &script.to_string_lossy(),
+                Default::default(),
+                params,
+            ))
             .await
             .unwrap();
         assert_eq!(outcome.outputs["env"], serde_json::json!("prod"));
@@ -269,9 +310,17 @@ mod tests {
 
     #[test]
     fn empty_script_is_invalid() {
-        let cfg = PythonOperator { script: "".to_string(), inputs: vec![], outputs: vec![] };
+        let cfg = PythonOperator {
+            script: "".to_string(),
+            inputs: vec![],
+            outputs: vec![],
+        };
         assert!(cfg.validate().is_some());
-        let cfg_ws = PythonOperator { script: "   ".to_string(), inputs: vec![], outputs: vec![] };
+        let cfg_ws = PythonOperator {
+            script: "   ".to_string(),
+            inputs: vec![],
+            outputs: vec![],
+        };
         assert!(cfg_ws.validate().is_some());
     }
 
@@ -286,7 +335,11 @@ mod tests {
         let name = format!("tinydag_py_test_valid_{}_{}.py", std::process::id(), seq);
         let path = dir.join(&name);
         std::fs::write(&path, "x = 1 + 2\nprint(x)\n").unwrap();
-        let cfg = PythonOperator { script: path.to_string_lossy().into_owned(), inputs: vec![], outputs: vec![] };
+        let cfg = PythonOperator {
+            script: path.to_string_lossy().into_owned(),
+            inputs: vec![],
+            outputs: vec![],
+        };
         let result = cfg.validate();
         let _ = std::fs::remove_file(&path);
         assert!(result.is_none());
@@ -299,7 +352,11 @@ mod tests {
         let name = format!("tinydag_py_test_bad_{}_{}.py", std::process::id(), seq);
         let path = dir.join(&name);
         std::fs::write(&path, "def f(\n").unwrap();
-        let cfg = PythonOperator { script: path.to_string_lossy().into_owned(), inputs: vec![], outputs: vec![] };
+        let cfg = PythonOperator {
+            script: path.to_string_lossy().into_owned(),
+            inputs: vec![],
+            outputs: vec![],
+        };
         let result = cfg.validate();
         let _ = std::fs::remove_file(&path);
         assert!(result.is_some(), "expected syntax error, got None");
@@ -326,7 +383,11 @@ mod tests {
         let name = format!("tinydag_py_resolve_{}_{}.py", std::process::id(), seq);
         let path = dir.join(&name);
         std::fs::write(&path, "x = 1\n").unwrap();
-        let mut cfg = PythonOperator { script: name, inputs: vec![], outputs: vec![] };
+        let mut cfg = PythonOperator {
+            script: name,
+            inputs: vec![],
+            outputs: vec![],
+        };
         let err = cfg.resolve(&dir);
         let _ = std::fs::remove_file(&path);
         assert!(err.is_none(), "resolve failed: {err:?}");

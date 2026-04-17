@@ -78,7 +78,11 @@ impl Operator for BashOperator {
 
 fn bash_n_cmd(cmd: &str, dir: &Path) -> Option<String> {
     let seq = SYNTAX_CHECK_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp = dir.join(format!("tinydag-bash-syntax-{}-{}.sh", std::process::id(), seq));
+    let tmp = dir.join(format!(
+        "tinydag-bash-syntax-{}-{}.sh",
+        std::process::id(),
+        seq
+    ));
     if let Err(e) = std::fs::write(&tmp, cmd) {
         return Some(format!("failed to write syntax check file: {e}"));
     }
@@ -109,7 +113,7 @@ pub fn run() -> ! {
     use std::process::{Command, Stdio};
     use std::sync::atomic::Ordering;
 
-    use super::{parse_outputs_json, run_operator, scalar_str, FailedErrorType, CHILD_PGID};
+    use super::{CHILD_PGID, FailedErrorType, parse_outputs_json, run_operator, scalar_str};
 
     run_operator("bash", |payload, work_dir| {
         let cmd_val = payload["task_ref"]["cmd"].as_str();
@@ -147,15 +151,23 @@ pub fn run() -> ! {
         };
 
         let mut bash = Command::new("bash");
-        bash.arg(&script_path).current_dir(work_dir).stdout(Stdio::piped());
+        bash.arg(&script_path)
+            .current_dir(work_dir)
+            .stdout(Stdio::piped());
         for (k, v) in inputs {
             if let Some(s) = scalar_str(v) {
-                bash.env(format!("TINYDAG_INPUT_{}", k.to_uppercase().replace('-', "_")), s);
+                bash.env(
+                    format!("TINYDAG_INPUT_{}", k.to_uppercase().replace('-', "_")),
+                    s,
+                );
             }
         }
         for (k, v) in params {
             if let Some(s) = scalar_str(v) {
-                bash.env(format!("TINYDAG_PARAM_{}", k.to_uppercase().replace('-', "_")), s);
+                bash.env(
+                    format!("TINYDAG_PARAM_{}", k.to_uppercase().replace('-', "_")),
+                    s,
+                );
             }
         }
 
@@ -172,7 +184,11 @@ pub fn run() -> ! {
 
         if !output.status.success() {
             let code = output.status.code().unwrap_or(-1);
-            return Err((FailedErrorType::Unspecified, format!("bash exited {code}"), code));
+            return Err((
+                FailedErrorType::Unspecified,
+                format!("bash exited {code}"),
+                code,
+            ));
         }
         parse_outputs_json(&output.stdout)
     })
@@ -192,7 +208,10 @@ mod tests {
 
     #[test]
     fn neither_cmd_nor_script_is_invalid() {
-        let cfg = BashOperator { cmd: None, script: None };
+        let cfg = BashOperator {
+            cmd: None,
+            script: None,
+        };
         assert!(cfg.validate().is_some());
     }
 
@@ -207,15 +226,24 @@ mod tests {
 
     #[test]
     fn empty_cmd_is_invalid() {
-        let cfg = BashOperator { cmd: Some("".to_string()), script: None };
+        let cfg = BashOperator {
+            cmd: Some("".to_string()),
+            script: None,
+        };
         assert!(cfg.validate().is_some());
-        let cfg_ws = BashOperator { cmd: Some("   ".to_string()), script: None };
+        let cfg_ws = BashOperator {
+            cmd: Some("   ".to_string()),
+            script: None,
+        };
         assert!(cfg_ws.validate().is_some());
     }
 
     #[test]
     fn empty_script_is_invalid() {
-        let cfg = BashOperator { cmd: None, script: Some("".to_string()) };
+        let cfg = BashOperator {
+            cmd: None,
+            script: Some("".to_string()),
+        };
         assert!(cfg.validate().is_some());
     }
 
@@ -225,13 +253,19 @@ mod tests {
 
     #[test]
     fn bash_n_passes_for_valid_cmd() {
-        let cfg = BashOperator { cmd: Some("echo hello".to_string()), script: None };
+        let cfg = BashOperator {
+            cmd: Some("echo hello".to_string()),
+            script: None,
+        };
         assert!(cfg.validate().is_none());
     }
 
     #[test]
     fn bash_n_catches_syntax_error_in_cmd() {
-        let cfg = BashOperator { cmd: Some("if then done".to_string()), script: None };
+        let cfg = BashOperator {
+            cmd: Some("if then done".to_string()),
+            script: None,
+        };
         assert!(cfg.validate().is_some());
     }
 
@@ -242,7 +276,10 @@ mod tests {
         let name = format!("tinydag_bash_test_{}_{}.sh", std::process::id(), seq);
         let path = dir.join(&name);
         std::fs::write(&path, "echo hello\n").unwrap();
-        let cfg = BashOperator { cmd: None, script: Some(path.to_string_lossy().into_owned()) };
+        let cfg = BashOperator {
+            cmd: None,
+            script: Some(path.to_string_lossy().into_owned()),
+        };
         let result = cfg.validate();
         let _ = std::fs::remove_file(&path);
         assert!(result.is_none());
@@ -255,7 +292,10 @@ mod tests {
         let name = format!("tinydag_bash_test_bad_{}_{}.sh", std::process::id(), seq);
         let path = dir.join(&name);
         std::fs::write(&path, "if then done\n").unwrap();
-        let cfg = BashOperator { cmd: None, script: Some(path.to_string_lossy().into_owned()) };
+        let cfg = BashOperator {
+            cmd: None,
+            script: Some(path.to_string_lossy().into_owned()),
+        };
         let result = cfg.validate();
         let _ = std::fs::remove_file(&path);
         assert!(result.is_some());
@@ -267,7 +307,10 @@ mod tests {
 
     #[test]
     fn resolve_is_no_op_for_cmd() {
-        let mut cfg = BashOperator { cmd: Some("echo hi".to_string()), script: None };
+        let mut cfg = BashOperator {
+            cmd: Some("echo hi".to_string()),
+            script: None,
+        };
         assert!(cfg.resolve(Path::new("/tmp")).is_none());
         assert_eq!(cfg.cmd, Some("echo hi".to_string()));
         assert!(cfg.script.is_none());
@@ -280,7 +323,10 @@ mod tests {
         let name = format!("tinydag_bash_resolve_{}_{}.sh", std::process::id(), seq);
         let path = dir.join(&name);
         std::fs::write(&path, "echo hi\n").unwrap();
-        let mut cfg = BashOperator { cmd: None, script: Some(name) };
+        let mut cfg = BashOperator {
+            cmd: None,
+            script: Some(name),
+        };
         let err = cfg.resolve(&dir);
         let _ = std::fs::remove_file(&path);
         assert!(err.is_none(), "resolve failed: {err:?}");

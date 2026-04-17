@@ -7,12 +7,12 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 
-use crate::executor::Executor;
 use crate::dag::DagDef;
-use crate::runner::{run, RunConfig, RunError, RunOutcome};
+use crate::executor::Executor;
+use crate::runner::{RunConfig, RunError, RunOutcome, run};
 
 pub struct Scheduler {
-    dags:     DashMap<String, DagDef>,
+    dags: DashMap<String, DagDef>,
     executor: Arc<dyn Executor>,
 }
 
@@ -24,7 +24,10 @@ pub enum TriggerError {
 
 impl Scheduler {
     pub fn new(executor: Arc<dyn Executor>) -> Self {
-        Self { dags: DashMap::new(), executor }
+        Self {
+            dags: DashMap::new(),
+            executor,
+        }
     }
 
     pub fn register(&self, dag: DagDef) {
@@ -36,10 +39,15 @@ impl Scheduler {
         &self,
         dag_id: &str,
     ) -> Result<tokio::task::JoinHandle<Result<RunOutcome, RunError>>, TriggerError> {
-        let dag = self.dags.get(dag_id)
+        let dag = self
+            .dags
+            .get(dag_id)
             .ok_or_else(|| TriggerError::UnknownDag(dag_id.to_string()))?
             .clone();
-        let config = RunConfig { dag, executor: Arc::clone(&self.executor) };
+        let config = RunConfig {
+            dag,
+            executor: Arc::clone(&self.executor),
+        };
         Ok(tokio::task::spawn(run(config)))
     }
 }
@@ -51,15 +59,17 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-    use crate::executor::LocalExecutor;
     use crate::dag::DagDef;
+    use crate::executor::LocalExecutor;
+    use std::collections::HashMap;
 
     async fn bash_executor() -> Arc<dyn Executor> {
         let test_bin = std::env::current_exe().expect("can't locate test binary");
         let binary = test_bin
-            .parent().unwrap()  // …/deps
-            .parent().unwrap()  // …/debug
+            .parent()
+            .unwrap() // …/deps
+            .parent()
+            .unwrap() // …/debug
             .join("tinydag-op-bash");
         let mut registry = HashMap::new();
         registry.insert("bash".to_string(), binary.to_string_lossy().into_owned());
@@ -74,10 +84,12 @@ mod tests {
     async fn trigger_known_dag_succeeds() {
         let executor = bash_executor().await;
         let scheduler = Scheduler::new(executor);
-        let dag = compile_dag(r#"
+        let dag = compile_dag(
+            r#"
 dag("test")
 bash_operator("a", cmd="printf '{\"outputs\":{}}'  ")
-"#);
+"#,
+        );
         scheduler.register(dag);
         let handle = scheduler.trigger("test").unwrap();
         let outcome = handle.await.unwrap().unwrap();
@@ -96,10 +108,12 @@ bash_operator("a", cmd="printf '{\"outputs\":{}}'  ")
     async fn trigger_failing_task_propagates_error() {
         let executor = bash_executor().await;
         let scheduler = Scheduler::new(executor);
-        let dag = compile_dag(r#"
+        let dag = compile_dag(
+            r#"
 dag("test")
 bash_operator("a", cmd="exit 1")
-"#);
+"#,
+        );
         scheduler.register(dag);
         let handle = scheduler.trigger("test").unwrap();
         let err = handle.await.unwrap().unwrap_err();
