@@ -8,7 +8,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 
 use crate::executor::Executor;
-use crate::ir::DagDef;
+use crate::dag::DagDef;
 use crate::runner::{run, RunConfig, RunError, RunOutcome};
 
 pub struct Scheduler {
@@ -28,7 +28,7 @@ impl Scheduler {
     }
 
     pub fn register(&self, dag: DagDef) {
-        self.dags.insert(dag.dag_id.clone(), dag);
+        self.dags.insert(dag.dag_id().to_string(), dag);
     }
 
     /// Spawn a run task for `dag_id` and return a handle the caller can await.
@@ -53,8 +53,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use crate::executor::LocalExecutor;
-
-    use crate::ir::{BashConfig, DagDef, Node, RetryPolicy, TaskRef};
+    use crate::dag::DagDef;
 
     async fn bash_executor() -> Arc<dyn Executor> {
         let test_bin = std::env::current_exe().expect("can't locate test binary");
@@ -67,26 +66,18 @@ mod tests {
         Arc::new(LocalExecutor::with_registry(registry).await)
     }
 
-    fn bash_node(id: &str, cmd: &str) -> Node {
-        Node {
-            id: id.to_string(),
-            task_ref: TaskRef::Bash(BashConfig { cmd: cmd.to_string() }),
-            retry: RetryPolicy::default(),
-            timeout_secs: None,
-        }
-    }
-
-    fn single_node_dag(node: Node) -> DagDef {
-        let mut dag = DagDef::new("test");
-        dag.nodes.push(node);
-        dag
+    fn compile_dag(src: &str) -> DagDef {
+        crate::compiler::compile_source("test.star", src, None).unwrap()
     }
 
     #[tokio::test]
     async fn trigger_known_dag_succeeds() {
         let executor = bash_executor().await;
         let scheduler = Scheduler::new(executor);
-        let dag = single_node_dag(bash_node("a", r#"printf '{"outputs":{}}'  "#));
+        let dag = compile_dag(r#"
+dag("test")
+bash_operator("a", cmd="printf '{\"outputs\":{}}'  ")
+"#);
         scheduler.register(dag);
         let handle = scheduler.trigger("test").unwrap();
         let outcome = handle.await.unwrap().unwrap();
@@ -105,7 +96,10 @@ mod tests {
     async fn trigger_failing_task_propagates_error() {
         let executor = bash_executor().await;
         let scheduler = Scheduler::new(executor);
-        let dag = single_node_dag(bash_node("a", "exit 1"));
+        let dag = compile_dag(r#"
+dag("test")
+bash_operator("a", cmd="exit 1")
+"#);
         scheduler.register(dag);
         let handle = scheduler.trigger("test").unwrap();
         let err = handle.await.unwrap().unwrap_err();

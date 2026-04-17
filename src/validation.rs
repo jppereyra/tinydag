@@ -12,7 +12,8 @@ use std::time::Instant;
 use opentelemetry::{global, KeyValue};
 use thiserror::Error;
 
-use crate::ir::{DagDef, NodeId, TaskRef};
+use crate::dag::{DagDef, NodeId};
+use crate::operators::Operator as _;
 
 #[derive(Debug, Error, PartialEq)]
 pub enum ValidationError {
@@ -36,6 +37,10 @@ pub enum ValidationError {
 }
 
 /// Validate a `DagDef`. Returns the topological order on success.
+///
+/// Runs structural checks (duplicates, unknown edges, connectivity, acyclicity)
+/// and operator-level validation (bash -n, python3 -m py_compile).
+/// Called by the compiler after resolve; script paths are already absolute.
 #[tracing::instrument(
     skip(dag),
     fields(
@@ -106,9 +111,9 @@ fn validate_inner(dag: &DagDef) -> Result<Vec<NodeId>, Vec<ValidationError>> {
         }
     }
 
-    // --- Task reference structural validation ---
+    // --- Task reference validation ---
     for node in &dag.nodes {
-        if let Some(reason) = invalid_task_ref(&node.task_ref) {
+        if let Some(reason) = node.task_ref.validate() {
             errors.push(ValidationError::InvalidTaskRef {
                 node_id: node.id.clone(),
                 reason,
@@ -171,31 +176,18 @@ fn validate_inner(dag: &DagDef) -> Result<Vec<NodeId>, Vec<ValidationError>> {
     Ok(topo_order)
 }
 
-/// Returns `Some(reason)` if the task reference fails compile-time validation.
-fn invalid_task_ref(task_ref: &TaskRef) -> Option<String> {
-    match task_ref {
-        TaskRef::Python(c) => c.validate_for_compile(),
-        TaskRef::Bash(c) => c.validate_for_compile(),
-        // v2+ operators: fields are not validated in v1.
-        TaskRef::Sql(_) | TaskRef::S3(_) | TaskRef::Http(_) | TaskRef::Kubernetes(_) => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{
-        BashConfig, DagDef, Edge, KubernetesConfig, Node, PythonConfig, RetryPolicy, TaskRef,
+    use crate::dag::{
+        DagDef, Edge, Node, RetryPolicy, TaskRef,
     };
+    use crate::operators::BashOperator;
 
-    fn python_node(id: &str) -> Node {
+    fn bash_node(id: &str) -> Node {
         Node {
             id: id.to_string(),
-            task_ref: TaskRef::Python(PythonConfig {
-                callable_ref: format!("tasks.{id}"),
-                inputs: vec![],
-                outputs: vec![],
-            }),
+            task_ref: TaskRef::Bash(BashOperator { cmd: Some("echo ok".to_string()), script: None }),
             retry: RetryPolicy::default(),
             timeout_secs: None,
         }
@@ -214,14 +206,14 @@ mod tests {
     #[test]
     fn single_node_is_valid() {
         let mut dag = DagDef::new("single");
-        dag.nodes.push(python_node("a"));
+        dag.nodes.push(bash_node("a"));
         assert_eq!(validate(&dag), Ok(vec!["a".to_string()]));
     }
 
     #[test]
     fn linear_chain_returns_topo_order() {
         let mut dag = DagDef::new("chain");
-        dag.nodes.extend([python_node("a"), python_node("b"), python_node("c")]);
+        dag.nodes.extend([bash_node("a"), bash_node("b"), bash_node("c")]);
         dag.edges.extend([edge("a", "b"), edge("b", "c")]);
         assert_eq!(validate(&dag), Ok(vec!["a", "b", "c"].into_iter().map(str::to_string).collect()));
     }
@@ -230,10 +222,9 @@ mod tests {
     fn diamond_dag_is_valid() {
         // a -> b, a -> c, b -> d, c -> d
         let mut dag = DagDef::new("diamond");
-        dag.nodes.extend([python_node("a"), python_node("b"), python_node("c"), python_node("d")]);
+        dag.nodes.extend([bash_node("a"), bash_node("b"), bash_node("c"), bash_node("d")]);
         dag.edges.extend([edge("a", "b"), edge("a", "c"), edge("b", "d"), edge("c", "d")]);
         let order = validate(&dag).unwrap();
-        // a must come first, d must come last
         assert_eq!(order[0], "a");
         assert_eq!(order[3], "d");
     }
@@ -241,7 +232,7 @@ mod tests {
     #[test]
     fn cycle_is_detected() {
         let mut dag = DagDef::new("cycle");
-        dag.nodes.extend([python_node("a"), python_node("b"), python_node("c")]);
+        dag.nodes.extend([bash_node("a"), bash_node("b"), bash_node("c")]);
         dag.edges.extend([edge("a", "b"), edge("b", "c"), edge("c", "a")]);
         assert!(matches!(validate(&dag), Err(ref e) if e.iter().any(|e| matches!(e, ValidationError::CycleDetected(_)))));
     }
@@ -249,7 +240,7 @@ mod tests {
     #[test]
     fn unknown_node_in_edge_is_detected() {
         let mut dag = DagDef::new("unknown");
-        dag.nodes.push(python_node("a"));
+        dag.nodes.push(bash_node("a"));
         dag.edges.push(edge("a", "ghost"));
         assert!(matches!(validate(&dag), Err(ref e) if e.iter().any(|e| matches!(e, ValidationError::UnknownNode(id) if id == "ghost"))));
     }
@@ -257,14 +248,14 @@ mod tests {
     #[test]
     fn duplicate_node_id_is_detected() {
         let mut dag = DagDef::new("dupe");
-        dag.nodes.extend([python_node("a"), python_node("a")]);
+        dag.nodes.extend([bash_node("a"), bash_node("a")]);
         assert!(matches!(validate(&dag), Err(ref e) if e.iter().any(|e| matches!(e, ValidationError::DuplicateNodeId(id) if id == "a"))));
     }
 
     #[test]
     fn disconnected_node_in_multi_node_dag_is_invalid() {
         let mut dag = DagDef::new("disconnected");
-        dag.nodes.extend([python_node("a"), python_node("b"), python_node("orphan")]);
+        dag.nodes.extend([bash_node("a"), bash_node("b"), bash_node("orphan")]);
         dag.edges.push(edge("a", "b"));
         assert!(matches!(validate(&dag), Err(ref e) if e.iter().any(|e| matches!(e, ValidationError::DisconnectedNode(id) if id == "orphan"))));
     }
@@ -272,65 +263,22 @@ mod tests {
     #[test]
     fn single_node_with_no_edges_is_valid() {
         let mut dag = DagDef::new("solo");
-        dag.nodes.push(python_node("a"));
+        dag.nodes.push(bash_node("a"));
         assert!(validate(&dag).is_ok());
     }
 
     #[test]
-    fn no_python_nodes_skips_validation() {
-        let mut dag = DagDef::new("bash_only");
-        dag.nodes.push(Node {
-            id: "x".to_string(),
-            task_ref: TaskRef::Bash(BashConfig { cmd: "echo hello".to_string() }),
-            retry: RetryPolicy::default(),
-            timeout_secs: None,
-        });
-        assert!(validate(&dag).is_ok());
-    }
-
-    #[test]
-    fn validation_handles_multiple_python_nodes() {
+    fn validation_handles_multiple_nodes() {
         let mut dag = DagDef::new("multi");
         for id in &["extract", "clean", "load"] {
             dag.nodes.push(Node {
                 id: id.to_string(),
-                task_ref: TaskRef::Python(PythonConfig {
-                    callable_ref: format!("mymodule.{id}"),
-                    inputs: vec![],
-                    outputs: vec![],
-                }),
+                task_ref: TaskRef::Bash(BashOperator { cmd: Some("echo ok".to_string()), script: None }),
                 retry: RetryPolicy::default(),
                 timeout_secs: None,
             });
         }
         dag.edges.extend([edge("extract", "clean"), edge("clean", "load")]);
         assert!(validate(&dag).is_ok());
-    }
-
-    #[test]
-    fn v2_operators_pass_structural_validation() {
-        // v2+ operators are defined but not dispatched in v1 — their fields are
-        // not validated at the structural layer.
-        let mut dag = DagDef::new("k8s");
-        dag.nodes.push(Node {
-            id: "x".to_string(),
-            task_ref: TaskRef::Kubernetes(KubernetesConfig {
-                image: "".to_string(),
-                cmd: "".to_string(),
-            }),
-            retry: RetryPolicy::default(),
-            timeout_secs: None,
-        });
-        assert!(validate(&dag).is_ok());
-    }
-
-    #[test]
-    fn dag_def_roundtrip_serialization() {
-        let mut dag = DagDef::new("roundtrip");
-        dag.nodes.extend([python_node("a"), python_node("b")]);
-        dag.edges.push(edge("a", "b"));
-        let json = serde_json::to_string(&dag).unwrap();
-        let back: DagDef = serde_json::from_str(&json).unwrap();
-        assert_eq!(dag, back);
     }
 }

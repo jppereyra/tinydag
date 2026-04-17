@@ -24,7 +24,7 @@ The typical flow:
 1. User lands a diff containing a new or changed Starlark file
 2. CI compiles the pipeline: `tinydag compile pipeline.star`
 3. CI runs pipeline-level tests: `pytest test_pipeline.py`
-4. On success, CI registers the compiled IR with the scheduler:
+4. On success, CI registers the compiled DAG definition with the scheduler:
    `tinydag register pipeline.star`
 5. The scheduler picks up the new version; the next trigger runs it
 
@@ -93,5 +93,5 @@ immediately and notify all downstream dependents, instead of hanging or retrying
 indefinitely.
 
 This requires a registry of inter-pipeline dependencies and a notification
-mechanism. The IR has a dedicated field for inter-pipeline dependency declarations
+mechanism. The DAG definition has a dedicated field for inter-pipeline dependency declarations
 from day one, even if v1 does not enforce them.

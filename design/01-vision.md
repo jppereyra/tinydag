@@ -22,5 +22,5 @@ Full Airflow compatibility is out of scope as it would require reimplementing
 the Airflow runtime to support.
 
 What is in scope is structural compatibility: parse an Airflow DAG file, extract
-graph topology and task references, and import into tinydag IR.
+graph topology and task references, and import as a tinydag DAG definition.
 This gives users a starting point for migration rather than a blank page.

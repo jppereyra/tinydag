@@ -12,8 +12,9 @@ use opentelemetry::{global, KeyValue};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::executor::{DispatchPayload, Executor, ExecutorError, TaskOutcome, operator_type_str};
-use crate::ir::{DagDef, NodeId, Trigger};
+use crate::executor::{DispatchPayload, Executor, ExecutorError, TaskOutcome};
+use crate::dag::{DagDef, NodeId, Trigger};
+use crate::operators::Operator;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -55,9 +56,9 @@ pub enum RunError {
 
 /// Run a DAG to completion.
 ///
-/// Validates the DAG, then dispatches tasks as their dependencies are satisfied,
-/// running independent branches in parallel. Aborts on the first task failure
-/// for now.
+/// DagDef is trusted by construction; validation and resolution happened at
+/// compile time. Dispatches tasks as their dependencies are satisfied, running
+/// independent branches in parallel. Aborts on the first task failure for now.
 #[tracing::instrument(
     skip(config),
     fields(
@@ -70,7 +71,7 @@ pub enum RunError {
 pub async fn run(config: RunConfig) -> Result<RunOutcome, RunError> {
     let start = Instant::now();
     let run_id = make_run_id();
-    tracing::Span::current().record("run.id", &run_id.as_str());
+    tracing::Span::current().record("run.id", run_id.as_str());
 
     let result = run_inner(run_id, config).await;
 
@@ -97,6 +98,7 @@ pub async fn run(config: RunConfig) -> Result<RunOutcome, RunError> {
 
 async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunError> {
     let dag = &config.dag;
+
     let trigger = trigger_type_str(&dag.trigger).to_string();
 
     let mut in_degree: HashMap<&str, usize> =
@@ -171,6 +173,7 @@ async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunE
                 dag.user.clone(),
                 trigger.clone(),
                 inputs,
+                dag.params.clone(),
             );
 
             let executor = Arc::clone(&config.executor);
@@ -180,7 +183,7 @@ async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunE
             tracing::info!(
                 run.id  = %run_id,
                 node.id = %node_id,
-                operator.type = %operator_type_str(&node.task_ref),
+                operator.type = %&node.task_ref.type_name(),
                 "dispatching task"
             );
 
@@ -225,6 +228,15 @@ async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunE
                     "task succeeded"
                 );
                 tasks_succeeded_counter.add(1, &run_attrs);
+
+                for (output_name, output_value) in &outcome.outputs {
+                    tracing::info!(
+                        task.id      = %node_id,
+                        output.name  = %output_name,
+                        output.value = %output_value,
+                        "task output"
+                    );
+                }
 
                 outputs.insert(node_id.clone(), outcome.outputs.clone());
                 succeeded.push(node_id.clone());
@@ -279,7 +291,7 @@ fn make_run_id() -> String {
 mod tests {
     use super::*;
     use crate::executor::LocalExecutor;
-    use crate::ir::{BashConfig, DagDef, Edge, Node, RetryPolicy, TaskRef};
+    use crate::dag::DagDef;
 
     async fn bash_executor() -> Arc<dyn Executor> {
         let test_bin = std::env::current_exe().expect("can't locate test binary");
@@ -292,48 +304,38 @@ mod tests {
         Arc::new(LocalExecutor::with_registry(registry).await)
     }
 
-    fn bash_node(id: &str, cmd: &str, timeout: Option<u64>) -> Node {
-        Node {
-            id: id.to_string(),
-            task_ref: TaskRef::Bash(BashConfig { cmd: cmd.to_string() }),
-            retry: RetryPolicy::default(),
-            timeout_secs: timeout,
-        }
-    }
-
-    fn single_node_dag(node: Node) -> DagDef {
-        let mut dag = DagDef::new("test");
-        dag.nodes.push(node);
-        dag
+    fn compile_dag(src: &str) -> DagDef {
+        crate::compiler::compile_source("test.star", src, None).unwrap()
     }
 
     #[tokio::test]
     async fn single_successful_task() {
-        let dag = single_node_dag(bash_node("a", r#"printf '{"outputs":{}}'  "#, None));
+        let dag = compile_dag(r#"
+dag("test")
+bash_operator("a", cmd="printf '{\"outputs\":{}}'  ")
+"#);
         let outcome = run(RunConfig { dag, executor: bash_executor().await }).await.unwrap();
         assert_eq!(outcome.succeeded, vec!["a"]);
     }
 
     #[tokio::test]
     async fn failing_task_returns_run_error() {
-        let dag = single_node_dag(bash_node("a", "exit 1", None));
+        let dag = compile_dag(r#"
+dag("test")
+bash_operator("a", cmd="exit 1")
+"#);
         let err = run(RunConfig { dag, executor: bash_executor().await }).await.unwrap_err();
         assert!(matches!(err, RunError::TaskFailed { node_id, .. } if node_id == "a"));
     }
 
     #[tokio::test]
     async fn linear_chain_runs_in_order() {
-        let ok = r#"printf '{"outputs":{}}'  "#;
-        let mut dag = DagDef::new("chain");
-        dag.nodes.extend([
-            bash_node("a", ok, None),
-            bash_node("b", ok, None),
-            bash_node("c", ok, None),
-        ]);
-        dag.edges.extend([
-            Edge { from: "a".to_string(), to: "b".to_string() },
-            Edge { from: "b".to_string(), to: "c".to_string() },
-        ]);
+        let dag = compile_dag(r#"
+dag("chain")
+a = bash_operator("a", cmd="printf '{\"outputs\":{}}'  ")
+b = bash_operator("b", cmd="printf '{\"outputs\":{}}'  ", depends_on=a)
+bash_operator("c", cmd="printf '{\"outputs\":{}}'  ", depends_on=b)
+"#);
         let outcome = run(RunConfig { dag, executor: bash_executor().await }).await.unwrap();
         assert_eq!(outcome.succeeded.len(), 3);
         let pos: HashMap<&str, usize> = outcome
@@ -349,20 +351,13 @@ mod tests {
     #[tokio::test]
     async fn diamond_dag_all_nodes_complete() {
         // a -> b, a -> c, b -> d, c -> d
-        let ok = r#"printf '{"outputs":{}}'  "#;
-        let mut dag = DagDef::new("diamond");
-        dag.nodes.extend([
-            bash_node("a", ok, None),
-            bash_node("b", ok, None),
-            bash_node("c", ok, None),
-            bash_node("d", ok, None),
-        ]);
-        dag.edges.extend([
-            Edge { from: "a".to_string(), to: "b".to_string() },
-            Edge { from: "a".to_string(), to: "c".to_string() },
-            Edge { from: "b".to_string(), to: "d".to_string() },
-            Edge { from: "c".to_string(), to: "d".to_string() },
-        ]);
+        let dag = compile_dag(r#"
+dag("diamond")
+a = bash_operator("a", cmd="printf '{\"outputs\":{}}'  ")
+b = bash_operator("b", cmd="printf '{\"outputs\":{}}'  ", depends_on=a)
+c = bash_operator("c", cmd="printf '{\"outputs\":{}}'  ", depends_on=a)
+bash_operator("d", cmd="printf '{\"outputs\":{}}'  ", depends_on=[b, c])
+"#);
         let outcome = run(RunConfig { dag, executor: bash_executor().await }).await.unwrap();
         assert_eq!(outcome.succeeded.len(), 4);
         let pos: HashMap<&str, usize> = outcome
@@ -380,16 +375,12 @@ mod tests {
     #[tokio::test]
     async fn duplicate_output_name_is_an_error() {
         // a and b both produce name "x"; c depends on both — should fail.
-        let mut dag = DagDef::new("dup");
-        dag.nodes.extend([
-            bash_node("a", r#"printf '{"outputs":{"x":1}}'"#, None),
-            bash_node("b", r#"printf '{"outputs":{"x":2}}'"#, None),
-            bash_node("c", r#"printf '{"outputs":{}}'  "#, None),
-        ]);
-        dag.edges.extend([
-            Edge { from: "a".to_string(), to: "c".to_string() },
-            Edge { from: "b".to_string(), to: "c".to_string() },
-        ]);
+        let dag = compile_dag(r#"
+dag("dup")
+a = bash_operator("a", cmd="printf '{\"outputs\":{\"x\":1}}'")
+b = bash_operator("b", cmd="printf '{\"outputs\":{\"x\":2}}'")
+bash_operator("c", cmd="printf '{\"outputs\":{}}'  ", depends_on=[a, b])
+"#);
         let err = run(RunConfig { dag, executor: bash_executor().await }).await.unwrap_err();
         assert!(
             matches!(&err, RunError::DuplicateOutput { node_id, output_name }
@@ -401,18 +392,13 @@ mod tests {
     #[tokio::test]
     async fn distinct_output_names_from_multiple_predecessors_merge_cleanly() {
         // a produces "x", b produces "y"; c depends on both — no collision.
-        let mut dag = DagDef::new("merge");
-        dag.nodes.extend([
-            bash_node("a", r#"printf '{"outputs":{"x":1}}'"#, None),
-            bash_node("b", r#"printf '{"outputs":{"y":2}}'"#, None),
-            bash_node("c", r#"printf '{"outputs":{}}'  "#, None),
-        ]);
-        dag.edges.extend([
-            Edge { from: "a".to_string(), to: "c".to_string() },
-            Edge { from: "b".to_string(), to: "c".to_string() },
-        ]);
+        let dag = compile_dag(r#"
+dag("merge")
+a = bash_operator("a", cmd="printf '{\"outputs\":{\"x\":1}}'")
+b = bash_operator("b", cmd="printf '{\"outputs\":{\"y\":2}}'")
+bash_operator("c", cmd="printf '{\"outputs\":{}}'  ", depends_on=[a, b])
+"#);
         let outcome = run(RunConfig { dag, executor: bash_executor().await }).await.unwrap();
         assert_eq!(outcome.succeeded.len(), 3);
     }
-
 }

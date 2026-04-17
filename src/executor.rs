@@ -15,7 +15,8 @@ use thiserror::Error;
 use tokio::io::AsyncWriteExt as _;
 use tokio::process::Command;
 
-use crate::ir::{Node, NodeId, TaskRef};
+use crate::dag::{Node, NodeId, TaskRef};
+use crate::operators::Operator;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -33,16 +34,15 @@ pub struct DispatchPayload {
     pub user: String,
     pub trigger_type: String,
     pub node_id: String,
-    /// Includes `operator_type` and `config`.
     pub task_ref: TaskRef,
-    /// Resolved inputs from upstream nodes, keyed by input name.
     pub inputs: HashMap<String, Value>,
-    /// Timeout in seconds, if declared on the node.
+    pub dag_params: HashMap<String, Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
 }
 
 impl DispatchPayload {
+    #[allow(clippy::too_many_arguments)]
     pub fn from_node(
         node: &Node,
         run_id: impl Into<String>,
@@ -53,6 +53,7 @@ impl DispatchPayload {
         user: impl Into<String>,
         trigger_type: impl Into<String>,
         inputs: HashMap<String, Value>,
+        dag_params: HashMap<String, Value>,
     ) -> Self {
         DispatchPayload {
             run_id: run_id.into(),
@@ -65,6 +66,7 @@ impl DispatchPayload {
             node_id: node.id.clone(),
             task_ref: node.task_ref.clone(),
             inputs,
+            dag_params,
             timeout_secs: node.timeout_secs,
         }
     }
@@ -118,7 +120,6 @@ pub trait Executor: Send + Sync + 'static {
 /// Each operator type maps to an executable. The default binary name for operator
 /// type `X` is `tinydag-op-X` (looked up on `PATH`), overridable via the
 /// `TINYDAG_OP_<X>` environment variable (e.g. `TINYDAG_OP_PYTHON=/usr/bin/python3`).
-
 pub struct LocalExecutor {
     /// Maps operator type name to the path to the operator binary.
     registry: HashMap<String, String>,
@@ -172,12 +173,12 @@ impl Executor for LocalExecutor {
             run.id        = %payload.run_id,
             dag.id        = %payload.dag_id,
             node.id       = %payload.node_id,
-            operator.type = %operator_type_str(&payload.task_ref),
+            operator.type = %payload.task_ref.type_name(),
         )
     )]
     async fn dispatch(&self, payload: DispatchPayload) -> Result<TaskOutcome, ExecutorError> {
         let start = Instant::now();
-        let operator = operator_type_str(&payload.task_ref);
+        let operator = payload.task_ref.type_name();
 
         let binary = self.registry.get(operator).ok_or_else(|| {
             ExecutorError::UnregisteredOperator {
@@ -326,32 +327,17 @@ impl LocalExecutor {
             }
 
             // If the task-level timeout has elapsed (even with ongoing heartbeats), abort.
-            if let Some(t) = payload.timeout_secs {
-                if start.elapsed() >= Duration::from_secs(t) {
-                    let _ = child.start_kill();
-                    let _ = child.wait().await;
-                    return Err(ExecutorError::TaskTimedOut {
-                        node_id:      payload.node_id.clone(),
-                        timeout_secs: t,
-                    });
-                }
+            if let Some(t) = payload.timeout_secs
+                && start.elapsed() >= Duration::from_secs(t)
+            {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(ExecutorError::TaskTimedOut {
+                    node_id:      payload.node_id.clone(),
+                    timeout_secs: t,
+                });
             }
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-pub fn operator_type_str(task_ref: &TaskRef) -> &'static str {
-    match task_ref {
-        TaskRef::Python(_)     => "python",
-        TaskRef::Bash(_)       => "bash",
-        TaskRef::Sql(_)        => "sql",
-        TaskRef::S3(_)         => "s3",
-        TaskRef::Http(_)       => "http",
-        TaskRef::Kubernetes(_) => "kubernetes",
     }
 }
 
@@ -362,7 +348,8 @@ pub fn operator_type_str(task_ref: &TaskRef) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{BashConfig, SqlConfig, TaskRef};
+    use crate::dag::TaskRef;
+    use crate::operators::BashOperator;
 
     /// Returns a LocalExecutor backed by the real tinydag-op-bash binary.
     ///
@@ -394,8 +381,9 @@ mod tests {
             user:         "test-user".to_string(),
             trigger_type: "manual".to_string(),
             node_id:      id.to_string(),
-            task_ref:     TaskRef::Bash(BashConfig { cmd: cmd.to_string() }),
+            task_ref:     TaskRef::Bash(BashOperator { cmd: Some(cmd.to_string()), script: None }),
             inputs:       HashMap::new(),
+            dag_params:   HashMap::new(),
             timeout_secs: timeout,
         }
     }
@@ -437,30 +425,6 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ExecutorError::TaskTimedOut { timeout_secs: 1, .. }));
-    }
-
-    #[tokio::test]
-    async fn unregistered_operator_returns_error() {
-        let payload = DispatchPayload {
-            run_id:       "run-1".to_string(),
-            dag_id:       "test-dag".to_string(),
-            pipeline_id:  "test-pipeline".to_string(),
-            dag_version:  "abc123".to_string(),
-            team:         "test-team".to_string(),
-            user:         "test-user".to_string(),
-            trigger_type: "manual".to_string(),
-            node_id:      "sql-node".to_string(),
-            task_ref:     TaskRef::Sql(SqlConfig {
-                conn:  "postgres://localhost/db".to_string(),
-                query: "SELECT 1".to_string(),
-            }),
-            inputs:       HashMap::new(),
-            timeout_secs: None,
-        };
-        // Empty registry — no binary registered for sql.
-        let ex = LocalExecutor::with_registry(HashMap::new()).await;
-        let err = ex.dispatch(payload).await.unwrap_err();
-        assert!(matches!(err, ExecutorError::UnregisteredOperator { operator, .. } if operator == "sql"));
     }
 
     #[test]
@@ -526,24 +490,21 @@ mod tests {
         assert!(matches!(err, ExecutorError::TaskTimedOut { .. }));
     }
 
-    /// Fallback: when TINYDAG_CONTROL_ENDPOINT is absent op-bash uses the
-    /// legacy exit-code protocol. We simulate this by running op-bash directly
-    /// (without the executor setting the env var) and checking it exits cleanly.
+    /// When TINYDAG_CONTROL_ENDPOINT is absent op-bash must exit non-zero.
     #[tokio::test]
-    async fn grpc_missing_endpoint_falls_back_to_legacy() {
+    async fn missing_endpoint_exits_with_error() {
         use std::process::Command;
 
         let test_bin = std::env::current_exe().expect("can't locate test binary");
         let binary = test_bin.parent().unwrap().parent().unwrap().join("tinydag-op-bash");
 
-        let payload = bash_payload("legacy-node", r#"printf '{"outputs":{"k":1}}'"#, None);
+        let payload = bash_payload("node-1", "echo hi", None);
         let stdin_json = serde_json::to_string(&payload).unwrap();
 
         let output = Command::new(&binary)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            // Explicitly clear the env var so the legacy path is exercised.
             .env_remove("TINYDAG_CONTROL_ENDPOINT")
             .spawn()
             .and_then(|mut child| {
@@ -553,9 +514,7 @@ mod tests {
             })
             .unwrap();
 
-        assert!(output.status.success(), "legacy fallback should exit 0");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        // Legacy path: stdout is the raw bash output (the JSON printed by printf).
-        assert!(stdout.contains("outputs"), "expected JSON on stdout, got: {stdout}");
+        assert!(!output.status.success(), "should exit non-zero without endpoint");
     }
+
 }

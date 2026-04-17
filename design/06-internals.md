@@ -1,6 +1,6 @@
-### IR Structure
+### DAG Structure
 
-The IR captures graph structure and execution contracts, not task logic. Task
+The DAG definition captures graph structure and execution contracts, not task logic. Task
 logic is the user's responsibility.
 
 Fields:
@@ -19,7 +19,7 @@ Fields:
 - Owner (team / user)
 - Inter-pipeline dependency declarations
 
-Triggers are a first-class field in the IR. Every pipeline declares how it
+Triggers are a first-class field in the DAG definition. Every pipeline declares how it
 is activated: `cron`, `event`, `manual`, or `pipeline_completion`.
 
 With `pipeline_completion` a pipeline wakes dependents when it succeeds and
@@ -29,7 +29,7 @@ The trigger type is carried in every telemetry event, so it is always clear
 whether a run was scheduled, manually triggered, or woken by an upstream
 pipeline.
 
-The IR is serialized as **Protobuf**. A version hash is baked into every IR so that
+The DAG definition is serialized as **Protobuf**. A version hash is baked into every DAG so that
 when a DAG definition changes, it is a new version. Runs in flight belong to the
 version they started on.
 
@@ -43,7 +43,7 @@ tasks, it dispatches them to an execution backend and receives telemetry back.
 development and small deployments
 - v2+: remote backends (Kubernetes jobs, Lambda functions, any system that can
 accept a dispatch payload and emit telemetry)
-- tinydag is backend-agnostic, i.e. the IR carries enough metadata to generate
+- tinydag is backend-agnostic, i.e. the DAG definition carries enough metadata to generate
 the dispatch payload for any target
 
 ### Runner

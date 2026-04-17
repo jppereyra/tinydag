@@ -5,14 +5,14 @@
 The architecture is a compilation pipeline:
 
 ```
-Python DSL -> Parser -> IR -> Orchestrator
-                              ^
-External systems  ------------|
+Python DSL -> Parser -> DagDef -> Orchestrator
+                                  ^
+External systems  ----------------|
 ```
 
 The Python layer is a configuration language, not an execution environment.
-Users define pipelines in Python; tinydag parses that into an intermediate
-representation (IR) and the orchestrator never sees raw Python.
+Users define pipelines in Python; tinydag parses that into a DAG definition
+and the orchestrator never sees raw Python.
 This means users cannot interact with or affect the orchestrator from their
 pipeline code.
 
@@ -21,12 +21,12 @@ for exactly this use case. It's deterministic, no side effects, no imports,
 sandboxed. Worth studying as a reference for what restrictions to impose on
 the parser.
 
-External systems can submit IR directly, bypassing the Python DSL entirely.
+External systems can submit a DAG definition directly, bypassing the Python DSL entirely.
 
 ### Task Module Validation
 
 At compile time, tinydag attempts to import every callable reference declared in
-the IR. A malformed module, broken import, or missing function is caught here.
+the DAG definition. A malformed module, broken import, or missing function is caught here.
 
 **Validation modes:**
 
@@ -311,7 +311,7 @@ Backfills are a v2 feature. v1 supports scheduled and manual runs only.
 A backfill is not "run this pipeline again for old dates", it is "run a
 variant of this pipeline for a date range." That variant is a first-class
 artifact, not a runtime flag. It goes through the same compilation pipeline
-as any other DAG (parse → validate → IR → execute). The IR carries the date
+as any other DAG (parse → validate → DAG definition → execute). The DAG definition carries the date
 range and a pointer to the original pipeline version it was derived from.
 
 Users can specify pipeline modifications for a backfill: skipping tasks,

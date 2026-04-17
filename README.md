@@ -9,12 +9,12 @@ Runs *inside* a larger system rather than *being* the system. Owns the graph, th
 ## How it works
 
 ```
-Python DSL -> Parser -> IR -> Orchestrator (Rust)
+Python DSL -> Parser -> DagDef -> Orchestrator (Rust)
                               ^
 External systems  ------------|
 ```
 
-You define pipelines in Python. tinydag compiles them to an IR and the orchestrator never sees raw Python. External systems can submit an IR directly, bypassing the DSL entirely.
+You define pipelines in Python. tinydag compiles them to a DAG definition and the orchestrator never sees raw Python. External systems can submit a DAG definition directly, bypassing the DSL entirely.
 
 ```python
 # pipeline.star

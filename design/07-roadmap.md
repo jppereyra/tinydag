@@ -4,7 +4,7 @@
 
 - Starlark pipeline DSL with `PythonOperator` and `BashOperator`
 - Plain Python task modules with no tinydag imports
-- Parser that compiles to Protobuf IR
+- Parser that compiles to Protobuf
 - Structural validation at compile time (cycles, missing references, broken dependencies)
 - Callable validation at compile time (strict mode by default)
 - Explicit precondition functions required on every pipeline

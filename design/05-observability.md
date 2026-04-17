@@ -70,7 +70,7 @@ Every meaningful state transition is emitted as a structured event:
 
 ## Multi-tenancy
 
-Team and user are first-class fields in the IR and in every telemetry event.
+Team and user are first-class fields in the DAG definition and in every telemetry event.
 Retrofitting tenancy is painful.
 
 ---
