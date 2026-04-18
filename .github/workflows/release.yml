@@ -24,7 +24,7 @@ jobs:
             target: aarch64-apple-darwin
             archive: tinydag-aarch64-macos.tar.gz
 
-          - os: macos-13
+          - os: macos-15
             target: x86_64-apple-darwin
             archive: tinydag-x86_64-macos.tar.gz
 
