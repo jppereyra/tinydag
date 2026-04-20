@@ -69,16 +69,16 @@ pub fn run() -> ! {
     use std::process::{Command, Stdio};
     use std::sync::atomic::Ordering;
 
-    use super::{CHILD_PGID, FailedErrorType, read_outputs_file, run_operator};
+    use super::{CHILD_PGID, FailedErrorType, OperatorFailure, read_outputs_file, run_operator};
 
     run_operator("python", |payload, work_dir| {
-        let script = payload["task_ref"]["script"].as_str().ok_or_else(|| {
-            (
-                FailedErrorType::Unspecified,
-                "missing script in python config".into(),
-                1,
-            )
-        })?;
+        let script = payload["task_ref"]["script"]
+            .as_str()
+            .ok_or_else(|| OperatorFailure {
+                error_type: FailedErrorType::InvalidConfig,
+                message: "missing script in python config".into(),
+                exit_code: 1,
+            })?;
 
         fs::write(
             work_dir.join("tinydag_inputs.json"),
@@ -105,12 +105,10 @@ pub fn run() -> ! {
                 Ok(())
             })
             .spawn()
-            .map_err(|e| {
-                (
-                    FailedErrorType::Unspecified,
-                    format!("failed to spawn {python}: {e}"),
-                    1,
-                )
+            .map_err(|e| OperatorFailure {
+                error_type: FailedErrorType::RuntimeError,
+                message: format!("failed to spawn {python}: {e}"),
+                exit_code: 1,
             })?
         };
         CHILD_PGID.store(child.id() as i32, Ordering::SeqCst);
@@ -118,18 +116,22 @@ pub fn run() -> ! {
 
         if !status.success() {
             let code = status.code().unwrap_or(-1);
-            return Err((
-                FailedErrorType::Unspecified,
-                format!("python exited {code}"),
-                code,
-            ));
+            return Err(OperatorFailure {
+                error_type: FailedErrorType::TaskFailed,
+                message: format!("python exited {code}"),
+                exit_code: code,
+            });
         }
         read_outputs_file(work_dir)
     })
 }
 
-fn io_err(e: std::io::Error) -> (super::FailedErrorType, String, i32) {
-    (super::FailedErrorType::Unspecified, e.to_string(), 1)
+fn io_err(e: std::io::Error) -> super::OperatorFailure {
+    super::OperatorFailure {
+        error_type: super::FailedErrorType::RuntimeError,
+        message: e.to_string(),
+        exit_code: 1,
+    }
 }
 
 #[cfg(test)]

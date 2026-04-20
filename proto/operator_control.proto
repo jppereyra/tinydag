@@ -43,6 +43,14 @@ enum FailedErrorType {
   // The operator completed execution but could not produce valid outputs
   // or failed post-execution checks.
   INVALID_OUTPUT = 2;
+  // The user script ran and exited with a non-zero exit code.
+  TASK_FAILED = 3;
+  // tinydag could not set up the execution environment (spawn failure, I/O error).
+  // Retrying may help if the issue is transient.
+  RUNTIME_ERROR = 4;
+  // The dispatch payload is malformed or missing required fields.
+  // Retrying will not help without fixing the config.
+  INVALID_CONFIG = 5;
 }
 
 // Sent when the operator fails.

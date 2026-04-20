@@ -20,6 +20,12 @@ use proto::{FailedEvent, HeartbeatEvent, StartedEvent, SucceededEvent};
 
 pub use proto::FailedErrorType;
 
+pub struct OperatorFailure {
+    pub error_type: FailedErrorType,
+    pub message: String,
+    pub exit_code: i32,
+}
+
 // ---------------------------------------------------------------------------
 // Signal handling
 // ---------------------------------------------------------------------------
@@ -156,17 +162,17 @@ impl GrpcSession {
 ///
 /// File absent → `Ok("{}")`. File present with valid `{"outputs": {...}}` →
 /// `Ok(serialized_inner_map)`. File present but invalid → `Err(InvalidOutput, ...)`.
-pub fn read_outputs_file(work_dir: &Path) -> Result<String, (FailedErrorType, String, i32)> {
+pub fn read_outputs_file(work_dir: &Path) -> Result<String, OperatorFailure> {
     let path = work_dir.join("tinydag_outputs.json");
     let contents = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok("{}".to_string()),
         Err(e) => {
-            return Err((
-                FailedErrorType::InvalidOutput,
-                format!("failed to read tinydag_outputs.json: {e}"),
-                0,
-            ));
+            return Err(OperatorFailure {
+                error_type: FailedErrorType::InvalidOutput,
+                message: format!("failed to read tinydag_outputs.json: {e}"),
+                exit_code: 0,
+            });
         }
     };
     if contents.trim().is_empty() {
@@ -177,17 +183,17 @@ pub fn read_outputs_file(work_dir: &Path) -> Result<String, (FailedErrorType, St
             Some(outputs) => {
                 Ok(serde_json::to_string(outputs).unwrap_or_else(|_| "{}".to_string()))
             }
-            None => Err((
-                FailedErrorType::InvalidOutput,
-                "tinydag_outputs.json did not contain an \"outputs\" key".to_string(),
-                0,
-            )),
+            None => Err(OperatorFailure {
+                error_type: FailedErrorType::InvalidOutput,
+                message: "tinydag_outputs.json did not contain an \"outputs\" key".to_string(),
+                exit_code: 0,
+            }),
         },
-        Err(e) => Err((
-            FailedErrorType::InvalidOutput,
-            format!("expected {{\"outputs\": {{...}}}} in tinydag_outputs.json: {e}"),
-            0,
-        )),
+        Err(e) => Err(OperatorFailure {
+            error_type: FailedErrorType::InvalidOutput,
+            message: format!("expected {{\"outputs\": {{...}}}} in tinydag_outputs.json: {e}"),
+            exit_code: 0,
+        }),
     }
 }
 
@@ -205,7 +211,7 @@ pub fn read_outputs_file(work_dir: &Path) -> Result<String, (FailedErrorType, St
 /// an error. This function never returns (`-> !`).
 pub fn run_operator<F>(operator_name: &'static str, f: F) -> !
 where
-    F: FnOnce(&serde_json::Value, &Path) -> Result<String, (FailedErrorType, String, i32)>,
+    F: FnOnce(&serde_json::Value, &Path) -> Result<String, OperatorFailure>,
 {
     // 1. Register SIGTERM handler.
     unsafe {
@@ -278,7 +284,11 @@ where
             session.report_succeeded(json);
             std::process::exit(0);
         }
-        Err((error_type, message, exit_code)) => {
+        Err(OperatorFailure {
+            error_type,
+            message,
+            exit_code,
+        }) => {
             session.report_failed(error_type, message, exit_code);
             std::process::exit(0);
         }

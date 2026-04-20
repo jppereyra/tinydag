@@ -106,7 +106,7 @@ pub fn run() -> ! {
     use std::process::{Command, Stdio};
     use std::sync::atomic::Ordering;
 
-    use super::{CHILD_PGID, FailedErrorType, read_outputs_file, run_operator};
+    use super::{CHILD_PGID, FailedErrorType, OperatorFailure, read_outputs_file, run_operator};
 
     run_operator("bash", |payload, work_dir| {
         let cmd_val = payload["task_ref"]["cmd"].as_str();
@@ -132,11 +132,11 @@ pub fn run() -> ! {
         } else if let Some(script) = script_val {
             PathBuf::from(script)
         } else {
-            return Err((
-                FailedErrorType::Unspecified,
-                "bash config: neither cmd nor script is set".into(),
-                1,
-            ));
+            return Err(OperatorFailure {
+                error_type: FailedErrorType::InvalidConfig,
+                message: "bash config: neither cmd nor script is set".into(),
+                exit_code: 1,
+            });
         };
 
         let mut bash = Command::new("bash");
@@ -158,18 +158,22 @@ pub fn run() -> ! {
 
         if !status.success() {
             let code = status.code().unwrap_or(-1);
-            return Err((
-                FailedErrorType::Unspecified,
-                format!("bash exited {code}"),
-                code,
-            ));
+            return Err(OperatorFailure {
+                error_type: FailedErrorType::TaskFailed,
+                message: format!("bash exited {code}"),
+                exit_code: code,
+            });
         }
         read_outputs_file(work_dir)
     })
 }
 
-fn io_err(e: std::io::Error) -> (super::FailedErrorType, String, i32) {
-    (super::FailedErrorType::Unspecified, e.to_string(), 1)
+fn io_err(e: std::io::Error) -> super::OperatorFailure {
+    super::OperatorFailure {
+        error_type: super::FailedErrorType::RuntimeError,
+        message: e.to_string(),
+        exit_code: 1,
+    }
 }
 
 #[cfg(test)]
