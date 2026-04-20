@@ -135,21 +135,19 @@ fn io_err(e: std::io::Error) -> (super::FailedErrorType, String, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static SYNTAX_CHECK_SEQ: AtomicU64 = AtomicU64::new(0);
 
     // -----------------------------------------------------------------------
     // run() path — requires the full gRPC stack via LocalExecutor
     // -----------------------------------------------------------------------
 
-    /// Write a temp `.py` script and return its absolute path.
-    fn write_script(content: &str) -> std::path::PathBuf {
-        let seq = SYNTAX_CHECK_SEQ.fetch_add(1, Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("tinydag_py_run_{}_{}.py", std::process::id(), seq));
-        std::fs::write(&path, content).expect("write temp python script");
-        path
+    /// Write a temp `.py` script and return a handle that keeps the file alive.
+    fn write_script(content: &str) -> tempfile::NamedTempFile {
+        let file = tempfile::Builder::new()
+            .suffix(".py")
+            .tempfile()
+            .expect("create temp python script");
+        std::fs::write(file.path(), content).expect("write temp python script");
+        file
     }
 
     async fn python_executor() -> crate::executor::LocalExecutor {
@@ -205,7 +203,7 @@ mod tests {
         );
         let ex = python_executor().await;
         let outcome = ex
-            .dispatch(python_payload("py-1", &script.to_string_lossy()))
+            .dispatch(python_payload("py-1", &script.path().to_string_lossy()))
             .await
             .unwrap();
         assert_eq!(outcome.exit_code, Some(0));
@@ -218,7 +216,7 @@ mod tests {
         let script = write_script("pass\n");
         let ex = python_executor().await;
         let outcome = ex
-            .dispatch(python_payload("py-1", &script.to_string_lossy()))
+            .dispatch(python_payload("py-1", &script.path().to_string_lossy()))
             .await
             .unwrap();
         assert!(outcome.outputs.is_empty());
@@ -230,7 +228,7 @@ mod tests {
         let script = write_script("import sys; sys.exit(7)\n");
         let ex = python_executor().await;
         let err = ex
-            .dispatch(python_payload("py-1", &script.to_string_lossy()))
+            .dispatch(python_payload("py-1", &script.path().to_string_lossy()))
             .await
             .unwrap_err();
         assert!(matches!(err, ExecutorError::TaskFailed { code: 7, .. }));
@@ -248,7 +246,7 @@ mod tests {
         let outcome = ex
             .dispatch(python_payload_with(
                 "py-1",
-                &script.to_string_lossy(),
+                &script.path().to_string_lossy(),
                 inputs,
                 Default::default(),
             ))
@@ -269,7 +267,7 @@ mod tests {
         let outcome = ex
             .dispatch(python_payload_with(
                 "py-1",
-                &script.to_string_lossy(),
+                &script.path().to_string_lossy(),
                 Default::default(),
                 params,
             ))
@@ -315,36 +313,26 @@ mod tests {
 
     #[test]
     fn py_compile_passes_for_valid_script() {
-        let dir = std::env::temp_dir();
-        let seq = SYNTAX_CHECK_SEQ.fetch_add(1, Ordering::Relaxed);
-        let name = format!("tinydag_py_test_valid_{}_{}.py", std::process::id(), seq);
-        let path = dir.join(&name);
-        std::fs::write(&path, "x = 1 + 2\nprint(x)\n").unwrap();
+        let file = tempfile::Builder::new().suffix(".py").tempfile().unwrap();
+        std::fs::write(file.path(), "x = 1 + 2\nprint(x)\n").unwrap();
         let cfg = PythonOperator {
-            script: path.to_string_lossy().into_owned(),
+            script: file.path().to_string_lossy().into_owned(),
             inputs: vec![],
             outputs: vec![],
         };
-        let result = cfg.validate();
-        let _ = std::fs::remove_file(&path);
-        assert!(result.is_none());
+        assert!(cfg.validate().is_none());
     }
 
     #[test]
     fn py_compile_catches_syntax_error() {
-        let dir = std::env::temp_dir();
-        let seq = SYNTAX_CHECK_SEQ.fetch_add(1, Ordering::Relaxed);
-        let name = format!("tinydag_py_test_bad_{}_{}.py", std::process::id(), seq);
-        let path = dir.join(&name);
-        std::fs::write(&path, "def f(\n").unwrap();
+        let file = tempfile::Builder::new().suffix(".py").tempfile().unwrap();
+        std::fs::write(file.path(), "def f(\n").unwrap();
         let cfg = PythonOperator {
-            script: path.to_string_lossy().into_owned(),
+            script: file.path().to_string_lossy().into_owned(),
             inputs: vec![],
             outputs: vec![],
         };
-        let result = cfg.validate();
-        let _ = std::fs::remove_file(&path);
-        assert!(result.is_some(), "expected syntax error, got None");
+        assert!(cfg.validate().is_some(), "expected syntax error, got None");
     }
 
     #[test]
@@ -364,17 +352,23 @@ mod tests {
     #[test]
     fn resolve_canonicalizes_to_absolute() {
         let dir = std::env::temp_dir();
-        let seq = SYNTAX_CHECK_SEQ.fetch_add(1, Ordering::Relaxed);
-        let name = format!("tinydag_py_resolve_{}_{}.py", std::process::id(), seq);
-        let path = dir.join(&name);
-        std::fs::write(&path, "x = 1\n").unwrap();
+        let file = tempfile::Builder::new()
+            .suffix(".py")
+            .tempfile_in(&dir)
+            .unwrap();
+        std::fs::write(file.path(), "x = 1\n").unwrap();
+        let name = file
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         let mut cfg = PythonOperator {
             script: name,
             inputs: vec![],
             outputs: vec![],
         };
         let err = cfg.resolve(&dir);
-        let _ = std::fs::remove_file(&path);
         assert!(err.is_none(), "resolve failed: {err:?}");
         assert!(cfg.script.starts_with('/'));
     }

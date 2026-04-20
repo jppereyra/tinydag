@@ -27,7 +27,7 @@
 - [ ] Add `clap` before the CLI grows more commands.
 - [ ] `run_operator` does too many things.
 - [ ] `validation.rs` and `runner.rs` both independently build a graph.
-- [ ] Replace `SYNTAX_CHECK_SEQ` `AtomicU64` counters in tests with `tempfile::NamedTempFile`.
+- [x] Replace `SYNTAX_CHECK_SEQ` `AtomicU64` counters in tests with `tempfile::NamedTempFile`.
 - [ ] Structured error output in CLI: errors should be human-readable and
       machine-parseable
 - [ ] `tinydag add` exit codes: 0 success, 1 compile/validation error, 2 task failed,

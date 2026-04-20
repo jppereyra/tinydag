@@ -515,9 +515,6 @@ pub fn compile(path: &Path) -> Result<DagDef, CompileError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static SYNTAX_CHECK_SEQ: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn compile_minimal_bash_dag() {
@@ -599,17 +596,11 @@ bash_operator("c", cmd="echo c", depends_on=["a", "b"])
     #[test]
     fn compile_python_operator_roundtrips_script() {
         // Python operator validate() runs py_compile, so we need a real file.
-        let seq = SYNTAX_CHECK_SEQ.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "tinydag_compiler_test_{}_{}.py",
-            std::process::id(),
-            seq
-        ));
-        std::fs::write(&path, "pass\n").unwrap();
-        let script = path.to_string_lossy().into_owned();
+        let file = tempfile::Builder::new().suffix(".py").tempfile().unwrap();
+        std::fs::write(file.path(), "pass\n").unwrap();
+        let script = file.path().to_string_lossy().into_owned();
         let src = format!("dag(\"d\")\npython_operator(\"step1\", script=\"{script}\")\n");
         let dag = compile_source("test.star", &src, None).unwrap();
-        let _ = std::fs::remove_file(&path);
         match &dag.nodes[0].task_ref {
             TaskRef::Python(op) => assert_eq!(op.script, script),
             _ => panic!("expected Python operator"),

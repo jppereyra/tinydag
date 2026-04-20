@@ -1,13 +1,10 @@
 //! Bash operator config and runtime.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
 use super::Operator;
-
-static SYNTAX_CHECK_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Config for a Bash task.
 ///
@@ -60,7 +57,7 @@ impl Operator for BashOperator {
                 if cmd.trim().is_empty() {
                     return Some("bash cmd is empty".to_string());
                 }
-                bash_n_cmd(cmd, &std::env::temp_dir())
+                bash_n_cmd(cmd)
             }
             (None, Some(script)) => {
                 if script.trim().is_empty() {
@@ -76,19 +73,15 @@ impl Operator for BashOperator {
     }
 }
 
-fn bash_n_cmd(cmd: &str, dir: &Path) -> Option<String> {
-    let seq = SYNTAX_CHECK_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp = dir.join(format!(
-        "tinydag-bash-syntax-{}-{}.sh",
-        std::process::id(),
-        seq
-    ));
-    if let Err(e) = std::fs::write(&tmp, cmd) {
+fn bash_n_cmd(cmd: &str) -> Option<String> {
+    let tmp = match tempfile::Builder::new().suffix(".sh").tempfile() {
+        Ok(f) => f,
+        Err(e) => return Some(format!("failed to create syntax check file: {e}")),
+    };
+    if let Err(e) = std::fs::write(tmp.path(), cmd) {
         return Some(format!("failed to write syntax check file: {e}"));
     }
-    let result = bash_n_file(&tmp);
-    let _ = std::fs::remove_file(&tmp);
-    result
+    bash_n_file(tmp.path())
 }
 
 fn bash_n_file(path: &Path) -> Option<String> {
@@ -252,34 +245,24 @@ mod tests {
 
     #[test]
     fn bash_n_passes_for_valid_script_file() {
-        let dir = std::env::temp_dir();
-        let seq = SYNTAX_CHECK_SEQ.fetch_add(1, Ordering::Relaxed);
-        let name = format!("tinydag_bash_test_{}_{}.sh", std::process::id(), seq);
-        let path = dir.join(&name);
-        std::fs::write(&path, "echo hello\n").unwrap();
+        let file = tempfile::Builder::new().suffix(".sh").tempfile().unwrap();
+        std::fs::write(file.path(), "echo hello\n").unwrap();
         let cfg = BashOperator {
             cmd: None,
-            script: Some(path.to_string_lossy().into_owned()),
+            script: Some(file.path().to_string_lossy().into_owned()),
         };
-        let result = cfg.validate();
-        let _ = std::fs::remove_file(&path);
-        assert!(result.is_none());
+        assert!(cfg.validate().is_none());
     }
 
     #[test]
     fn bash_n_catches_syntax_error_in_script_file() {
-        let dir = std::env::temp_dir();
-        let seq = SYNTAX_CHECK_SEQ.fetch_add(1, Ordering::Relaxed);
-        let name = format!("tinydag_bash_test_bad_{}_{}.sh", std::process::id(), seq);
-        let path = dir.join(&name);
-        std::fs::write(&path, "if then done\n").unwrap();
+        let file = tempfile::Builder::new().suffix(".sh").tempfile().unwrap();
+        std::fs::write(file.path(), "if then done\n").unwrap();
         let cfg = BashOperator {
             cmd: None,
-            script: Some(path.to_string_lossy().into_owned()),
+            script: Some(file.path().to_string_lossy().into_owned()),
         };
-        let result = cfg.validate();
-        let _ = std::fs::remove_file(&path);
-        assert!(result.is_some());
+        assert!(cfg.validate().is_some());
     }
 
     // -----------------------------------------------------------------------
@@ -300,16 +283,22 @@ mod tests {
     #[test]
     fn resolve_canonicalizes_script_to_absolute() {
         let dir = std::env::temp_dir();
-        let seq = SYNTAX_CHECK_SEQ.fetch_add(1, Ordering::Relaxed);
-        let name = format!("tinydag_bash_resolve_{}_{}.sh", std::process::id(), seq);
-        let path = dir.join(&name);
-        std::fs::write(&path, "echo hi\n").unwrap();
+        let file = tempfile::Builder::new()
+            .suffix(".sh")
+            .tempfile_in(&dir)
+            .unwrap();
+        std::fs::write(file.path(), "echo hi\n").unwrap();
+        let name = file
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         let mut cfg = BashOperator {
             cmd: None,
             script: Some(name),
         };
         let err = cfg.resolve(&dir);
-        let _ = std::fs::remove_file(&path);
         assert!(err.is_none(), "resolve failed: {err:?}");
         assert!(cfg.script.as_deref().unwrap().starts_with('/'));
     }
