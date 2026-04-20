@@ -20,7 +20,7 @@
 
 - [x] The `run_operator` closure returns `Result<String, (FailedErrorType, String, i32)>`
       which appears in a lot of places. Create the `OperatorFailure { error_type, message, exit_code }` struct.
-- [ ] Bundle `run_id`, `dag_id`,`pipeline_id`, `dag_version`, `team`, `user`, `trigger_type`
+- [x] Bundle `run_id`, `dag_id`,`pipeline_id`, `dag_version`, `team`, `user`, `trigger_type`
       into a `RunContext` struct.
 - [ ] **`unsafe` blocks missing `// SAFETY:` annotations**
 - [ ] Add `#[must_use]` to `compute_version_hash`, `validate`, and `compile`.

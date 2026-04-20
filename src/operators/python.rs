@@ -177,14 +177,17 @@ mod tests {
         dag_params: std::collections::HashMap<String, serde_json::Value>,
     ) -> crate::executor::DispatchPayload {
         use crate::dag::TaskRef;
+        use crate::executor::RunContext;
         crate::executor::DispatchPayload {
-            run_id: "run-1".to_string(),
-            dag_id: "test-dag".to_string(),
-            pipeline_id: "test-pipeline".to_string(),
-            dag_version: "abc123".to_string(),
-            team: "test-team".to_string(),
-            user: "test-user".to_string(),
-            trigger_type: "manual".to_string(),
+            ctx: RunContext {
+                run_id: "run-1".to_string(),
+                dag_id: "test-dag".to_string(),
+                pipeline_id: "test-pipeline".to_string(),
+                dag_version: "abc123".to_string(),
+                team: "test-team".to_string(),
+                user: "test-user".to_string(),
+                trigger_type: "manual".to_string(),
+            },
             node_id: node_id.to_string(),
             task_ref: TaskRef::Python(PythonOperator {
                 script: script.to_string(),

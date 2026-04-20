@@ -13,7 +13,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::dag::{DagDef, NodeId, Trigger};
-use crate::executor::{DispatchPayload, Executor, ExecutorError, TaskOutcome};
+use crate::executor::{DispatchPayload, Executor, ExecutorError, RunContext, TaskOutcome};
 use crate::operators::Operator;
 
 // ---------------------------------------------------------------------------
@@ -104,7 +104,15 @@ pub async fn run(config: RunConfig) -> Result<RunOutcome, RunError> {
 async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunError> {
     let dag = &config.dag;
 
-    let trigger = trigger_type_str(&dag.trigger).to_string();
+    let ctx = RunContext {
+        run_id: run_id.clone(),
+        dag_id: dag.dag_id.clone(),
+        pipeline_id: dag.pipeline_id.clone(),
+        dag_version: dag.version_hash.clone(),
+        team: dag.team.clone(),
+        user: dag.user.clone(),
+        trigger_type: trigger_type_str(&dag.trigger).to_string(),
+    };
 
     let mut in_degree: HashMap<&str, usize> =
         dag.nodes.iter().map(|n| (n.id.as_str(), 0)).collect();
@@ -171,18 +179,8 @@ async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunE
                 }
             }
 
-            let payload = DispatchPayload::from_node(
-                &node,
-                run_id.clone(),
-                dag.dag_id.clone(),
-                dag.pipeline_id.clone(),
-                dag.version_hash.clone(),
-                dag.team.clone(),
-                dag.user.clone(),
-                trigger.clone(),
-                inputs,
-                dag.params.clone(),
-            );
+            let payload =
+                DispatchPayload::from_node(&node, ctx.clone(), inputs, dag.params.clone());
 
             let executor = Arc::clone(&config.executor);
             let tx2 = tx.clone();

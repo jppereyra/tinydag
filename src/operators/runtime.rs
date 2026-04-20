@@ -237,7 +237,7 @@ where
 
     // 3. Extract node_id, run_id.
     let node_id = payload["node_id"].as_str().unwrap_or("task").to_string();
-    let run_id = payload["run_id"].as_str().unwrap_or("").to_string();
+    let run_id = payload["ctx"]["run_id"].as_str().unwrap_or("").to_string();
 
     // 4. Create work dir.
     let nanos = SystemTime::now()

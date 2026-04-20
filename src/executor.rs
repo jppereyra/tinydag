@@ -22,10 +22,9 @@ use crate::operators::Operator;
 // Public types
 // ---------------------------------------------------------------------------
 
-/// Everything an executor needs to dispatch a single task.
-/// Serialized as JSON and written to the operator binary's stdin.
+/// Run-level metadata shared across every task in a single DAG execution.
 #[derive(Debug, Clone, Serialize)]
-pub struct DispatchPayload {
+pub struct RunContext {
     pub run_id: String,
     pub dag_id: String,
     pub pipeline_id: String,
@@ -33,6 +32,13 @@ pub struct DispatchPayload {
     pub team: String,
     pub user: String,
     pub trigger_type: String,
+}
+
+/// Everything an executor needs to dispatch a single task.
+/// Serialized as JSON and written to the operator binary's stdin.
+#[derive(Debug, Clone, Serialize)]
+pub struct DispatchPayload {
+    pub ctx: RunContext,
     pub node_id: String,
     pub task_ref: TaskRef,
     pub inputs: HashMap<String, Value>,
@@ -42,27 +48,14 @@ pub struct DispatchPayload {
 }
 
 impl DispatchPayload {
-    #[allow(clippy::too_many_arguments)]
     pub fn from_node(
         node: &Node,
-        run_id: impl Into<String>,
-        dag_id: impl Into<String>,
-        pipeline_id: impl Into<String>,
-        dag_version: impl Into<String>,
-        team: impl Into<String>,
-        user: impl Into<String>,
-        trigger_type: impl Into<String>,
+        ctx: RunContext,
         inputs: HashMap<String, Value>,
         dag_params: HashMap<String, Value>,
     ) -> Self {
         DispatchPayload {
-            run_id: run_id.into(),
-            dag_id: dag_id.into(),
-            pipeline_id: pipeline_id.into(),
-            dag_version: dag_version.into(),
-            team: team.into(),
-            user: user.into(),
-            trigger_type: trigger_type.into(),
+            ctx,
             node_id: node.id.clone(),
             task_ref: node.task_ref.clone(),
             inputs,
@@ -189,8 +182,8 @@ impl Executor for LocalExecutor {
     #[tracing::instrument(
         skip(self, payload),
         fields(
-            run.id        = %payload.run_id,
-            dag.id        = %payload.dag_id,
+            run.id        = %payload.ctx.run_id,
+            dag.id        = %payload.ctx.dag_id,
             node.id       = %payload.node_id,
             operator.type = %payload.task_ref.type_name(),
         )
@@ -220,7 +213,7 @@ impl Executor for LocalExecutor {
             .record(
                 start.elapsed().as_secs_f64(),
                 &[
-                    KeyValue::new("dag.id", payload.dag_id.clone()),
+                    KeyValue::new("dag.id", payload.ctx.dag_id.clone()),
                     KeyValue::new("node.id", payload.node_id.clone()),
                     KeyValue::new("operator.type", operator),
                     KeyValue::new("result", if result.is_ok() { "success" } else { "failure" }),
@@ -245,7 +238,7 @@ impl LocalExecutor {
         // Register before spawning — guard removes the entry on drop.
         let (mut event_rx, _task_guard) = self
             .control_server
-            .register(payload.run_id.clone(), payload.node_id.clone());
+            .register(payload.ctx.run_id.clone(), payload.node_id.clone());
 
         let mut child = Command::new(binary)
             .stdin(Stdio::piped())
@@ -402,13 +395,15 @@ mod tests {
     /// Build a bash dispatch payload whose cmd drives the operator's behaviour.
     fn bash_payload(id: &str, cmd: &str, timeout: Option<u64>) -> DispatchPayload {
         DispatchPayload {
-            run_id: "run-1".to_string(),
-            dag_id: "test-dag".to_string(),
-            pipeline_id: "test-pipeline".to_string(),
-            dag_version: "abc123".to_string(),
-            team: "test-team".to_string(),
-            user: "test-user".to_string(),
-            trigger_type: "manual".to_string(),
+            ctx: RunContext {
+                run_id: "run-1".to_string(),
+                dag_id: "test-dag".to_string(),
+                pipeline_id: "test-pipeline".to_string(),
+                dag_version: "abc123".to_string(),
+                team: "test-team".to_string(),
+                user: "test-user".to_string(),
+                trigger_type: "manual".to_string(),
+            },
             node_id: id.to_string(),
             task_ref: TaskRef::Bash(BashOperator {
                 cmd: Some(cmd.to_string()),
