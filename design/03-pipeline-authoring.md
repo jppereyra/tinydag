@@ -303,6 +303,72 @@ further:
 - **Team environments:** tests serve as documentation of intent as much as
   correctness checks when multiple people touch the same pipeline definitions
 
+## 5. Macros
+
+TL;DR: tinydag does not support macros.
+
+We define macros as arbitrary Python functions called inside templates rendering
+at task execution time, on the worker, right before `execute()` runs.
+They usually look like `{{ my_macro(ds, table) }}` in operator params.
+
+**We have seen them cause problems:**
+
+- They run on workers at execution time which means workers need network access
+  to every external system any macro might call. A macro that queries the Hive
+  metastore means every worker needs metastore access.
+- They run at different times for different tasks in the same run. If 20 tasks
+  use `{{ max_partition('events') }}`, that's 20 separate metastore calls at
+  20 different moments. If a new partition lands mid-run, different tasks can
+  see different values. **The pipeline produces silently incorrect data with no
+  error, no failure, nothing in the logs.**
+- The scheduler sees a template string, not a function call. It cannot enforce
+  ordering, cannot retry the macro call independently, cannot surface it in
+  telemetry.
+- The solution to the previous points usually involve adding complxity to the
+  macro (caching, more network calls, etc.) so they grow.
+  Teams start with `{{ format_date(ds) }}` and end up with macros
+  that make API calls, query databases, and implement business logic, all
+  running inside the template renderer with no observability.
+- Error messages tend to be bad.
+
+**So, in tinydag:**
+
+Anything a macroo would compute belongs in a task that emits it as an output.
+The canonical example:
+
+```python
+# Instead of: cmd = "process --partition={{ max_partition('events') }}"
+
+max_partition = python_operator("max-partition",
+    script  = "tasks/max_partition.py",
+    outputs = ["partition"],
+)
+
+process = bash_operator("process",
+    cmd        = "process --partition=$(jq -r .partition tinydag_inputs.json)",
+    inputs     = ["partition"],
+    depends_on = max_partition,
+)
+```
+
+`max_partition.py` calls the metastore once, emits the value as an output.
+Every downstream task receives exactly that value. The partition is frozen for
+the duration of the run.
+
+What you gain over the macro approach:
+- The metastore call is a node in the graph with start time, duration,
+  success/failure status, and retry policy
+- A metastore failure is a clear task failure, not a cryptic template error
+- The partition value is an auditable output visible in telemetry
+- `inputs = ["partition"]` makes the dependency explicit and compile-time checkable
+- `tasks/max_partition.py` is testable in isolation with plain pytest
+
+**For execution context** (run date, run ID, etc.) the scheduler injects a
+rich set of standard variables into `tinydag_params.json` automatically. No
+template syntax needed.
+
+**The broader principle:** Every custom macro is a piece of business
+logic that escaped into the wrong layer.
 
 ## Backfills
 
