@@ -159,13 +159,12 @@ async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunE
             let node = dag.nodes.iter().find(|n| n.id == node_id).unwrap().clone();
 
             // Gather inputs: forward only outputs that the node declared as inputs.
-            let declared_inputs = node.task_ref.declared_inputs();
             let mut inputs: HashMap<String, Value> = HashMap::new();
             for edge in dag.edges.iter().filter(|e| e.to == node_id) {
                 for (output_name, value) in
                     outputs.get(edge.from.as_str()).cloned().unwrap_or_default()
                 {
-                    if !declared_inputs.iter().any(|s| s == &output_name) {
+                    if !node.inputs.iter().any(|s| s == &output_name) {
                         continue;
                     }
                     if inputs.contains_key(&output_name) {

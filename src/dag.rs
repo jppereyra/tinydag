@@ -58,6 +58,10 @@ pub struct Node {
     pub retry: RetryPolicy,
     /// Timeout in seconds. `None` = no timeout.
     pub timeout_secs: Option<u64>,
+    /// Named inputs this node reads from its predecessors' outputs.
+    pub inputs: Vec<String>,
+    /// Named outputs this node declares it will produce.
+    pub outputs: Vec<String>,
 }
 
 /// A directed edge: `from` must complete before `to` can start.
@@ -176,7 +180,7 @@ impl DagDef {
             let node = self.nodes.iter().find(|n| n.id == *id).unwrap();
             hasher.update(id.as_bytes());
             hasher.update(b"\x00");
-            // Operator type + field values (script path, cmd, inputs, outputs).
+            // Operator type + field values (script path, cmd).
             hasher.update(
                 serde_json::to_string(&node.task_ref)
                     .unwrap_or_default()
@@ -186,6 +190,19 @@ impl DagDef {
             // Operator runtime content: cmd text or script file bytes.
             hasher.update(node.task_ref.content_for_hash());
             hasher.update(b"\x00");
+            // Task-level inputs and outputs (sorted for determinism).
+            let mut sorted_inputs = node.inputs.clone();
+            sorted_inputs.sort_unstable();
+            for name in &sorted_inputs {
+                hasher.update(name.as_bytes());
+                hasher.update(b"\x03");
+            }
+            let mut sorted_outputs = node.outputs.clone();
+            sorted_outputs.sort_unstable();
+            for name in &sorted_outputs {
+                hasher.update(name.as_bytes());
+                hasher.update(b"\x04");
+            }
         }
 
         // Edges: sort (from, to) pairs.
@@ -227,6 +244,8 @@ mod tests {
             task_ref: crate::operators::TaskRef::stub(),
             retry: RetryPolicy::default(),
             timeout_secs: None,
+            inputs: vec![],
+            outputs: vec![],
         }
     }
 

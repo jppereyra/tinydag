@@ -29,7 +29,10 @@ pub enum ValidationError {
     #[error("dag has no nodes")]
     EmptyDag,
 
-    #[error("node '{0}' is disconnected (no edges) in a multi-node dag")]
+    #[error(
+        "node '{0}' is disconnected (no edges) in a multi-node dag \
+         — connect it with depends_on or include it in build()"
+    )]
     DisconnectedNode(NodeId),
 
     #[error("node '{node_id}' has an invalid task reference: {reason}")]
@@ -46,11 +49,15 @@ pub enum ValidationError {
         predecessor_b: NodeId,
     },
 
-    #[error("node '{node_id}' declares input '{input_name}' but no predecessor produces it")]
+    #[error(
+        "node '{node_id}' declares input '{input_name}' but no predecessor produces it \
+         — add '{input_name}' to the outputs of a predecessor"
+    )]
     UnsatisfiedInput { node_id: NodeId, input_name: String },
 
     #[error(
-        "node '{node_id}' declares inputs {input_names:?} but has no predecessors to provide them"
+        "node '{node_id}' declares inputs {input_names:?} but has no predecessors to provide them \
+         — add depends_on to connect it to a predecessor"
     )]
     InputOnSourceNode {
         node_id: NodeId,
@@ -170,7 +177,7 @@ fn validate_inner(dag: &DagDef) -> Result<Vec<NodeId>, Vec<ValidationError>> {
         // output_name -> first predecessor that declared it
         let mut seen: HashMap<&str, &str> = HashMap::new();
         for &pred_id in preds {
-            for output_name in node_map[pred_id].task_ref.declared_outputs() {
+            for output_name in node_map[pred_id].outputs.as_slice() {
                 if let Some(&first) = seen.get(output_name.as_str()) {
                     errors.push(ValidationError::FanInOutputConflict {
                         node_id: node.id.clone(),
@@ -197,7 +204,7 @@ fn validate_inner(dag: &DagDef) -> Result<Vec<NodeId>, Vec<ValidationError>> {
     // --- Duplicate declared outputs on a single node ---
     for node in &dag.nodes {
         let mut seen_outputs: HashSet<&str> = HashSet::new();
-        for name in node.task_ref.declared_outputs() {
+        for name in node.outputs.as_slice() {
             if !seen_outputs.insert(name.as_str()) {
                 errors.push(ValidationError::DuplicateDeclaredOutput {
                     node_id: node.id.clone(),
@@ -211,7 +218,7 @@ fn validate_inner(dag: &DagDef) -> Result<Vec<NodeId>, Vec<ValidationError>> {
     // A node with no predecessors can never have its declared inputs satisfied.
     for node in &dag.nodes {
         if in_degree[node.id.as_str()] == 0 {
-            let inputs: Vec<String> = node.task_ref.declared_inputs().to_vec();
+            let inputs: Vec<String> = node.inputs.as_slice().to_vec();
             if !inputs.is_empty() {
                 errors.push(ValidationError::InputOnSourceNode {
                     node_id: node.id.clone(),
@@ -228,10 +235,10 @@ fn validate_inner(dag: &DagDef) -> Result<Vec<NodeId>, Vec<ValidationError>> {
         let preds = &predecessors[node.id.as_str()];
         let available: HashSet<&str> = preds
             .iter()
-            .flat_map(|&pid| node_map[pid].task_ref.declared_outputs())
+            .flat_map(|&pid| node_map[pid].outputs.as_slice())
             .map(String::as_str)
             .collect();
-        for input_name in node.task_ref.declared_inputs() {
+        for input_name in node.inputs.as_slice() {
             if !available.contains(input_name.as_str()) {
                 errors.push(ValidationError::UnsatisfiedInput {
                     node_id: node.id.clone(),
@@ -309,6 +316,30 @@ mod tests {
             task_ref: TaskRef::stub(),
             retry: RetryPolicy::default(),
             timeout_secs: None,
+            inputs: vec![],
+            outputs: vec![],
+        }
+    }
+
+    fn node_with_outputs(id: &str, outputs: Vec<String>) -> Node {
+        Node {
+            id: id.to_string(),
+            task_ref: TaskRef::stub(),
+            retry: RetryPolicy::default(),
+            timeout_secs: None,
+            inputs: vec![],
+            outputs,
+        }
+    }
+
+    fn node_with_inputs(id: &str, inputs: Vec<String>) -> Node {
+        Node {
+            id: id.to_string(),
+            task_ref: TaskRef::stub(),
+            retry: RetryPolicy::default(),
+            timeout_secs: None,
+            inputs,
+            outputs: vec![],
         }
     }
 
@@ -316,15 +347,6 @@ mod tests {
         Edge {
             from: from.to_string(),
             to: to.to_string(),
-        }
-    }
-
-    fn node_with_ref(id: &str, task_ref: TaskRef) -> Node {
-        Node {
-            id: id.to_string(),
-            task_ref,
-            retry: RetryPolicy::default(),
-            timeout_secs: None,
         }
     }
 
@@ -430,12 +452,7 @@ mod tests {
     fn validation_handles_multiple_nodes() {
         let mut dag = DagDef::new("multi");
         for id in &["extract", "clean", "load"] {
-            dag.nodes.push(Node {
-                id: id.to_string(),
-                task_ref: TaskRef::stub(),
-                retry: RetryPolicy::default(),
-                timeout_secs: None,
-            });
+            dag.nodes.push(bash_node(id));
         }
         dag.edges
             .extend([edge("extract", "clean"), edge("clean", "load")]);
@@ -445,9 +462,9 @@ mod tests {
     #[test]
     fn duplicate_declared_output_on_node_is_invalid() {
         let mut dag = DagDef::new("dup-out");
-        dag.nodes.push(node_with_ref(
+        dag.nodes.push(node_with_outputs(
             "a",
-            TaskRef::stub_with_outputs(vec!["x".to_string(), "x".to_string()]),
+            vec!["x".to_string(), "x".to_string()],
         ));
         assert!(
             matches!(validate(&dag), Err(ref e) if e.iter().any(|e| matches!(
@@ -460,10 +477,7 @@ mod tests {
     #[test]
     fn input_on_source_node_is_invalid() {
         let mut dag = DagDef::new("src-input");
-        dag.nodes.push(node_with_ref(
-            "a",
-            TaskRef::stub_with_inputs(vec!["x".to_string()]),
-        ));
+        dag.nodes.push(node_with_inputs("a", vec!["x".to_string()]));
         assert!(
             matches!(validate(&dag), Err(ref e) if e.iter().any(|e| matches!(
                 e, ValidationError::InputOnSourceNode { node_id, .. }
@@ -476,8 +490,8 @@ mod tests {
     fn unsatisfied_input_is_invalid() {
         let mut dag = DagDef::new("unsat");
         dag.nodes.extend([
-            node_with_ref("a", TaskRef::stub_with_outputs(vec!["y".to_string()])),
-            node_with_ref("b", TaskRef::stub_with_inputs(vec!["x".to_string()])),
+            node_with_outputs("a", vec!["y".to_string()]),
+            node_with_inputs("b", vec!["x".to_string()]),
         ]);
         dag.edges.push(edge("a", "b"));
         assert!(
@@ -492,8 +506,8 @@ mod tests {
     fn satisfied_input_passes() {
         let mut dag = DagDef::new("sat");
         dag.nodes.extend([
-            node_with_ref("a", TaskRef::stub_with_outputs(vec!["x".to_string()])),
-            node_with_ref("b", TaskRef::stub_with_inputs(vec!["x".to_string()])),
+            node_with_outputs("a", vec!["x".to_string()]),
+            node_with_inputs("b", vec!["x".to_string()]),
         ]);
         dag.edges.push(edge("a", "b"));
         assert!(validate(&dag).is_ok());

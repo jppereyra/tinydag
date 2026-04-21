@@ -91,15 +91,66 @@ pub enum CompileError {
 impl fmt::Display for CompileError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CompileError::Eval(e) => write!(f, "eval error: {e}"),
+            CompileError::Eval(e) => write!(f, "{e}"),
             CompileError::Validation(errs) => {
-                for e in errs {
-                    writeln!(f, "validation error: {e}")?;
+                for (i, e) in errs.iter().enumerate() {
+                    if i > 0 {
+                        writeln!(f)?;
+                    }
+                    write!(f, "{e}")?;
                 }
                 Ok(())
             }
         }
     }
+}
+
+/// Returns the n-th backtick-quoted token in `s` (0-indexed).
+fn nth_backtick(s: &str, n: usize) -> Option<&str> {
+    let mut count = 0;
+    let mut start: Option<usize> = None;
+    for (i, c) in s.char_indices() {
+        if c == '`' {
+            if let Some(begin) = start.take() {
+                if count == n {
+                    return Some(&s[begin..i]);
+                }
+                count += 1;
+            } else {
+                start = Some(i + 1);
+            }
+        }
+    }
+    None
+}
+
+/// Rewrites Starlark's generic "Missing named-only parameter" error into a
+/// user-friendly message with an example hint.
+fn rewrite_eval_error(e: anyhow::Error) -> anyhow::Error {
+    let msg = e.to_string();
+    if !msg.contains("Missing named-only parameter") {
+        return e;
+    }
+    if let (Some(param), Some(func)) = (nth_backtick(&msg, 0), nth_backtick(&msg, 1)) {
+        let hint = match param {
+            "outputs" => Some("list of output names, e.g. outputs=[\"result\"] or outputs=[]"),
+            "inputs" => {
+                Some("list of input names from predecessors, e.g. inputs=[\"data\"] or inputs=[]")
+            }
+            _ => crate::operators::param_hint(func, param),
+        };
+        if let Some(hint) = hint {
+            let needle = format!("Missing named-only parameter `{param}` for call to `{func}`");
+            return anyhow!(
+                "{}",
+                msg.replace(&needle, &format!("{func}: '{param}' is required ({hint})"))
+            );
+        }
+    }
+    anyhow!(
+        "{}",
+        msg.replace("Missing named-only parameter", "missing required parameter")
+    )
 }
 
 impl fmt::Debug for CompileError {
@@ -129,6 +180,8 @@ fn downcast_task_node<'v>(v: Value<'v>) -> anyhow::Result<TaskNode<'v>> {
             task_id: n.task_id.clone(),
             task_ref: n.task_ref.clone(),
             depends_on: n.depends_on.clone(),
+            inputs: n.inputs.clone(),
+            outputs: n.outputs.clone(),
             max_attempts: n.max_attempts,
             delay_secs: n.delay_secs,
             timeout_secs: n.timeout_secs,
@@ -145,6 +198,8 @@ fn downcast_task_node<'v>(v: Value<'v>) -> anyhow::Result<TaskNode<'v>> {
                 .iter()
                 .map(|fv: &FrozenValue| fv.to_value())
                 .collect(),
+            inputs: n.inputs.clone(),
+            outputs: n.outputs.clone(),
             max_attempts: n.max_attempts,
             delay_secs: n.delay_secs,
             timeout_secs: n.timeout_secs,
@@ -217,6 +272,8 @@ fn collect_graph<'v>(terminals: Vec<Value<'v>>) -> anyhow::Result<(Vec<Node>, Ve
                 delay_secs: n.delay_secs,
             },
             timeout_secs: n.timeout_secs,
+            inputs: n.inputs,
+            outputs: n.outputs,
         });
 
         for dep in n.depends_on {
@@ -317,7 +374,7 @@ pub fn compile(
     base_dir: Option<&Path>,
 ) -> Result<DagDef, CompileError> {
     let ast = AstModule::parse(filename, source.to_owned(), &Dialect::Standard)
-        .map_err(|e| anyhow!("{e}"))?;
+        .map_err(|e| rewrite_eval_error(anyhow!("{e}")))?;
 
     let globals = {
         let mut builder = GlobalsBuilder::standard().with(dag_compiler_globals);
@@ -331,7 +388,7 @@ pub fn compile(
     let return_val = {
         let mut eval = Evaluator::new(&module);
         eval.eval_module(ast, &globals)
-            .map_err(|e| anyhow!("{e}"))?
+            .map_err(|e| rewrite_eval_error(anyhow!("{e}")))?
     };
 
     let mut dag = {

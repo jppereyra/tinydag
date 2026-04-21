@@ -86,6 +86,17 @@ async fn main() {
     }
 }
 
+fn print_compile_errors(e: CompileError) {
+    match e {
+        CompileError::Eval(e) => eprintln!("error: {e}"),
+        CompileError::Validation(errs) => {
+            for e in errs {
+                eprintln!("error: {e}");
+            }
+        }
+    }
+}
+
 fn cmd_compile(args: &[String]) -> i32 {
     let Some(input) = args.get(2) else {
         eprintln!("usage: tinydag compile <pipeline.star> [--output <path>]");
@@ -140,14 +151,8 @@ fn cmd_compile(args: &[String]) -> i32 {
             println!("compiled {} nodes → {output_path}", dag.nodes().len());
             0
         }
-        Err(CompileError::Eval(e)) => {
-            eprintln!("error: {e}");
-            1
-        }
-        Err(CompileError::Validation(errs)) => {
-            for e in &errs {
-                eprintln!("error: {e}");
-            }
+        Err(e) => {
+            print_compile_errors(e);
             1
         }
     }
@@ -172,7 +177,7 @@ async fn cmd_add(args: &[String]) -> i32 {
     let dag = match tinydag::compiler::compile(path, &source, star_path.parent()) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("error: {e}");
+            print_compile_errors(e);
             return 1;
         }
     };

@@ -18,10 +18,6 @@ use super::{Operator, TaskNode, unpack_depends_on, unpack_optional_u64, unpack_s
 pub struct PythonOperator {
     /// Path to the `.py` script file. Resolved to an absolute path at compile time.
     pub script: String,
-    /// Named inputs this task reads. Order is not significant.
-    pub inputs: Vec<String>,
-    /// Named outputs this task produces. Order is not significant.
-    pub outputs: Vec<String>,
 }
 
 impl Operator for PythonOperator {
@@ -65,18 +61,18 @@ impl Operator for PythonOperator {
         "python"
     }
 
-    fn declared_outputs(&self) -> &[String] {
-        &self.outputs
-    }
-
-    fn declared_inputs(&self) -> &[String] {
-        &self.inputs
-    }
-
     fn content_for_hash(&self) -> Vec<u8> {
         // Safe to read: content_for_hash is called after validate(), which already
         // confirmed the script exists and is readable.
         std::fs::read(&self.script).unwrap_or_default()
+    }
+}
+
+/// Returns a hint for a missing required named parameter specific to python_operator.
+pub fn param_hint(name: &str) -> Option<&'static str> {
+    match name {
+        "script" => Some("path to the Python script, e.g. script=\"process.py\""),
+        _ => None,
     }
 }
 
@@ -102,10 +98,10 @@ pub fn register_globals(builder: &mut GlobalsBuilder) {
             task_id: task_id.to_owned(),
             task_ref: super::TaskRef::Python(PythonOperator {
                 script: script.to_owned(),
-                inputs: inputs_vec,
-                outputs: outputs_vec,
             }),
             depends_on: deps,
+            inputs: inputs_vec,
+            outputs: outputs_vec,
             max_attempts: max_attempts.max(1) as u32,
             delay_secs: delay_secs.max(0) as u64,
             timeout_secs: timeout,
@@ -240,8 +236,6 @@ mod tests {
             node_id: node_id.to_string(),
             task_ref: crate::operators::TaskRef::Python(PythonOperator {
                 script: script.to_string(),
-                inputs: vec![],
-                outputs: vec![],
             }),
             inputs,
             dag_params,
@@ -350,8 +344,6 @@ mod tests {
         use crate::operators::TaskRef;
         let task_ref = TaskRef::Python(PythonOperator {
             script: "mymodule/extract.py".to_string(),
-            inputs: vec![],
-            outputs: vec!["raw".to_string()],
         });
         let json = serde_json::to_string(&task_ref).unwrap();
         let back: TaskRef = serde_json::from_str(&json).unwrap();
@@ -362,14 +354,10 @@ mod tests {
     fn empty_script_is_invalid() {
         let cfg = PythonOperator {
             script: "".to_string(),
-            inputs: vec![],
-            outputs: vec![],
         };
         assert!(cfg.validate().is_some());
         let cfg_ws = PythonOperator {
             script: "   ".to_string(),
-            inputs: vec![],
-            outputs: vec![],
         };
         assert!(cfg_ws.validate().is_some());
     }
@@ -384,8 +372,6 @@ mod tests {
         std::fs::write(file.path(), "x = 1 + 2\nprint(x)\n").unwrap();
         let cfg = PythonOperator {
             script: file.path().to_string_lossy().into_owned(),
-            inputs: vec![],
-            outputs: vec![],
         };
         assert!(cfg.validate().is_none());
     }
@@ -396,8 +382,6 @@ mod tests {
         std::fs::write(file.path(), "def f(\n").unwrap();
         let cfg = PythonOperator {
             script: file.path().to_string_lossy().into_owned(),
-            inputs: vec![],
-            outputs: vec![],
         };
         assert!(cfg.validate().is_some(), "expected syntax error, got None");
     }
@@ -406,8 +390,6 @@ mod tests {
     fn py_compile_fails_for_missing_script() {
         let cfg = PythonOperator {
             script: "/tinydag_definitely_does_not_exist_xyz.py".to_string(),
-            inputs: vec![],
-            outputs: vec![],
         };
         assert!(cfg.validate().is_some());
     }
@@ -430,11 +412,7 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .to_string();
-        let mut cfg = PythonOperator {
-            script: name,
-            inputs: vec![],
-            outputs: vec![],
-        };
+        let mut cfg = PythonOperator { script: name };
         let err = cfg.resolve(&dir);
         assert!(err.is_none(), "resolve failed: {err:?}");
         assert!(cfg.script.starts_with('/'));
@@ -445,8 +423,6 @@ mod tests {
         let dir = std::env::temp_dir();
         let mut cfg = PythonOperator {
             script: "tinydag_definitely_does_not_exist_xyz.py".to_string(),
-            inputs: vec![],
-            outputs: vec![],
         };
         assert!(cfg.resolve(&dir).is_some());
     }

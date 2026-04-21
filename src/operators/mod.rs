@@ -37,18 +37,6 @@ pub trait Operator {
     fn content_for_hash(&self) -> Vec<u8> {
         Vec::new()
     }
-
-    /// Returns the output names this operator declares it will produce.
-    /// Used at compile time to detect fan-in output name collisions.
-    fn declared_outputs(&self) -> &[String] {
-        &[]
-    }
-
-    /// Returns the input names this operator declares it will consume.
-    /// Used at compile time to verify predecessors produce all required inputs.
-    fn declared_inputs(&self) -> &[String] {
-        &[]
-    }
 }
 
 /// How the task is invoked. A tagged union serialized with
@@ -88,20 +76,6 @@ impl Operator for TaskRef {
             TaskRef::Bash(c) => c.content_for_hash(),
         }
     }
-
-    fn declared_outputs(&self) -> &[String] {
-        match self {
-            TaskRef::Python(c) => c.declared_outputs(),
-            TaskRef::Bash(c) => c.declared_outputs(),
-        }
-    }
-
-    fn declared_inputs(&self) -> &[String] {
-        match self {
-            TaskRef::Python(c) => c.declared_inputs(),
-            TaskRef::Bash(c) => c.declared_inputs(),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -112,26 +86,6 @@ impl TaskRef {
         TaskRef::Bash(bash::BashOperator {
             cmd: Some("echo ok".to_string()),
             script: None,
-            outputs: vec![],
-            inputs: vec![],
-        })
-    }
-
-    pub(crate) fn stub_with_outputs(outputs: Vec<String>) -> Self {
-        TaskRef::Bash(bash::BashOperator {
-            cmd: Some("echo ok".to_string()),
-            script: None,
-            inputs: vec![],
-            outputs,
-        })
-    }
-
-    pub(crate) fn stub_with_inputs(inputs: Vec<String>) -> Self {
-        TaskRef::Bash(bash::BashOperator {
-            cmd: Some("echo ok".to_string()),
-            script: None,
-            inputs,
-            outputs: vec![],
         })
     }
 }
@@ -148,6 +102,8 @@ pub struct TaskNode<'v> {
     #[allocative(skip)]
     pub task_ref: TaskRef,
     pub depends_on: Vec<Value<'v>>,
+    pub inputs: Vec<String>,
+    pub outputs: Vec<String>,
     #[trace(unsafe_ignore)]
     pub max_attempts: u32,
     #[trace(unsafe_ignore)]
@@ -182,6 +138,8 @@ impl<'v> Freeze for TaskNode<'v> {
                 .into_iter()
                 .map(|v| freezer.freeze(v))
                 .collect::<FreezeResult<_>>()?,
+            inputs: self.inputs,
+            outputs: self.outputs,
             max_attempts: self.max_attempts,
             delay_secs: self.delay_secs,
             timeout_secs: self.timeout_secs,
@@ -196,6 +154,8 @@ pub struct FrozenTaskNode {
     #[allocative(skip)]
     pub task_ref: TaskRef,
     pub depends_on: Vec<FrozenValue>,
+    pub inputs: Vec<String>,
+    pub outputs: Vec<String>,
     pub max_attempts: u32,
     pub delay_secs: u64,
     pub timeout_secs: Option<u64>,
@@ -322,6 +282,25 @@ pub(crate) fn unpack_optional_string<'v>(
 /// Returns all operator DSL globals registration functions.
 pub fn all_operator_globals() -> Vec<fn(&mut GlobalsBuilder)> {
     vec![bash::register_globals, python::register_globals]
+}
+
+// ---------------------------------------------------------------------------
+// Operator-specific parameter hints for compilation error messages
+// ---------------------------------------------------------------------------
+
+/// Maps (dsl_function_name, hint_fn). New operators add one entry here.
+type HintFn = fn(&str) -> Option<&'static str>;
+
+static OPERATOR_HINT_REGISTRY: &[(&str, HintFn)] = &[("python_operator", python::param_hint)];
+
+/// Returns a hint string for a missing required named parameter on a specific
+/// operator DSL function. Returns `None` if no hint is registered.
+/// Task-level hints (`inputs`, `outputs`) are handled by the caller (compiler).
+pub fn param_hint(operator: &str, param: &str) -> Option<&'static str> {
+    OPERATOR_HINT_REGISTRY
+        .iter()
+        .find(|(name, _)| *name == operator)
+        .and_then(|(_, hint_fn)| hint_fn(param))
 }
 
 pub use runtime::{CHILD_PGID, FailedErrorType, OperatorFailure, read_outputs_file, run_operator};
