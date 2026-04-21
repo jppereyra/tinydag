@@ -8,7 +8,10 @@ use starlark::starlark_module;
 use starlark::values::Value;
 use starlark::values::none::NoneType;
 
-use super::{Operator, TaskNode, unpack_depends_on, unpack_optional_string, unpack_optional_u64};
+use super::{
+    Operator, TaskNode, unpack_depends_on, unpack_optional_string, unpack_optional_u64,
+    unpack_string_list,
+};
 
 /// Config for a Bash task.
 ///
@@ -23,6 +26,10 @@ pub struct BashOperator {
     /// Path to a `.sh` script file. Resolved to an absolute path at compile time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub script: Option<String>,
+    /// Named outputs this task produces. Order is not significant.
+    pub outputs: Vec<String>,
+    /// Named inputs this task reads. Order is not significant.
+    pub inputs: Vec<String>,
 }
 
 impl Operator for BashOperator {
@@ -76,6 +83,14 @@ impl Operator for BashOperator {
         "bash"
     }
 
+    fn declared_outputs(&self) -> &[String] {
+        &self.outputs
+    }
+
+    fn declared_inputs(&self) -> &[String] {
+        &self.inputs
+    }
+
     fn content_for_hash(&self) -> Vec<u8> {
         if let Some(cmd) = &self.cmd {
             return cmd.as_bytes().to_vec();
@@ -88,12 +103,15 @@ impl Operator for BashOperator {
 }
 
 /// Registers `bash_operator()` as a Starlark global.
+#[allow(clippy::too_many_arguments)]
 #[starlark_module]
 pub fn register_globals(builder: &mut GlobalsBuilder) {
     fn bash_operator<'v>(
         task_id: &str,
         #[starlark(require = named, default = NoneType)] cmd: Value<'v>,
         #[starlark(require = named, default = NoneType)] script: Value<'v>,
+        #[starlark(require = named)] outputs: Value<'v>,
+        #[starlark(require = named)] inputs: Value<'v>,
         #[starlark(require = named, default = NoneType)] depends_on: Value<'v>,
         #[starlark(require = named, default = NoneType)] timeout_secs: Value<'v>,
         #[starlark(require = named, default = 1i32)] max_attempts: i32,
@@ -108,6 +126,8 @@ pub fn register_globals(builder: &mut GlobalsBuilder) {
             }
             _ => {}
         }
+        let outputs_vec = unpack_string_list(outputs, "outputs")?;
+        let inputs_vec = unpack_string_list(inputs, "inputs")?;
         let deps = unpack_depends_on(depends_on)?;
         let timeout = unpack_optional_u64(timeout_secs, "timeout_secs")?;
         Ok(TaskNode {
@@ -115,6 +135,8 @@ pub fn register_globals(builder: &mut GlobalsBuilder) {
             task_ref: super::TaskRef::Bash(BashOperator {
                 cmd: cmd_opt,
                 script: script_opt,
+                outputs: outputs_vec,
+                inputs: inputs_vec,
             }),
             depends_on: deps,
             max_attempts: max_attempts.max(1) as u32,
@@ -236,10 +258,26 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    fn serialization_roundtrip() {
+        use crate::operators::TaskRef;
+        let task_ref = TaskRef::Bash(BashOperator {
+            cmd: Some("echo hello".to_string()),
+            script: None,
+            inputs: vec![],
+            outputs: vec!["result".to_string()],
+        });
+        let json = serde_json::to_string(&task_ref).unwrap();
+        let back: TaskRef = serde_json::from_str(&json).unwrap();
+        assert_eq!(task_ref, back);
+    }
+
+    #[test]
     fn neither_cmd_nor_script_is_invalid() {
         let cfg = BashOperator {
             cmd: None,
             script: None,
+            outputs: vec![],
+            inputs: vec![],
         };
         assert!(cfg.validate().is_some());
     }
@@ -249,6 +287,8 @@ mod tests {
         let cfg = BashOperator {
             cmd: Some("echo hi".to_string()),
             script: Some("run.sh".to_string()),
+            outputs: vec![],
+            inputs: vec![],
         };
         assert!(cfg.validate().is_some());
     }
@@ -258,11 +298,15 @@ mod tests {
         let cfg = BashOperator {
             cmd: Some("".to_string()),
             script: None,
+            outputs: vec![],
+            inputs: vec![],
         };
         assert!(cfg.validate().is_some());
         let cfg_ws = BashOperator {
             cmd: Some("   ".to_string()),
             script: None,
+            outputs: vec![],
+            inputs: vec![],
         };
         assert!(cfg_ws.validate().is_some());
     }
@@ -272,6 +316,8 @@ mod tests {
         let cfg = BashOperator {
             cmd: None,
             script: Some("".to_string()),
+            outputs: vec![],
+            inputs: vec![],
         };
         assert!(cfg.validate().is_some());
     }
@@ -285,6 +331,8 @@ mod tests {
         let cfg = BashOperator {
             cmd: Some("echo hello".to_string()),
             script: None,
+            outputs: vec![],
+            inputs: vec![],
         };
         assert!(cfg.validate().is_none());
     }
@@ -294,6 +342,8 @@ mod tests {
         let cfg = BashOperator {
             cmd: Some("if then done".to_string()),
             script: None,
+            outputs: vec![],
+            inputs: vec![],
         };
         assert!(cfg.validate().is_some());
     }
@@ -305,6 +355,8 @@ mod tests {
         let cfg = BashOperator {
             cmd: None,
             script: Some(file.path().to_string_lossy().into_owned()),
+            outputs: vec![],
+            inputs: vec![],
         };
         assert!(cfg.validate().is_none());
     }
@@ -316,6 +368,8 @@ mod tests {
         let cfg = BashOperator {
             cmd: None,
             script: Some(file.path().to_string_lossy().into_owned()),
+            outputs: vec![],
+            inputs: vec![],
         };
         assert!(cfg.validate().is_some());
     }
@@ -329,6 +383,8 @@ mod tests {
         let mut cfg = BashOperator {
             cmd: Some("echo hi".to_string()),
             script: None,
+            outputs: vec![],
+            inputs: vec![],
         };
         assert!(cfg.resolve(Path::new("/tmp")).is_none());
         assert_eq!(cfg.cmd, Some("echo hi".to_string()));
@@ -352,6 +408,8 @@ mod tests {
         let mut cfg = BashOperator {
             cmd: None,
             script: Some(name),
+            outputs: vec![],
+            inputs: vec![],
         };
         let err = cfg.resolve(&dir);
         assert!(err.is_none(), "resolve failed: {err:?}");
@@ -364,6 +422,8 @@ mod tests {
         let mut cfg = BashOperator {
             cmd: None,
             script: Some("tinydag_definitely_does_not_exist_xyz.sh".to_string()),
+            outputs: vec![],
+            inputs: vec![],
         };
         assert!(cfg.resolve(&dir).is_some());
     }

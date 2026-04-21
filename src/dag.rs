@@ -307,26 +307,6 @@ mod tests {
     }
 
     #[test]
-    fn task_ref_serialization_roundtrip() {
-        let cases: Vec<TaskRef> = vec![
-            TaskRef::Python(crate::operators::python::PythonOperator {
-                script: "mymodule/extract.py".to_string(),
-                inputs: vec![],
-                outputs: vec!["raw".to_string()],
-            }),
-            TaskRef::Bash(crate::operators::bash::BashOperator {
-                cmd: Some("echo hello".to_string()),
-                script: None,
-            }),
-        ];
-        for task_ref in cases {
-            let json = serde_json::to_string(&task_ref).unwrap();
-            let back: TaskRef = serde_json::from_str(&json).unwrap();
-            assert_eq!(task_ref, back);
-        }
-    }
-
-    #[test]
     fn dag_params_serializes_to_json() {
         let mut dag = DagDef::new("parameterized");
         dag.params

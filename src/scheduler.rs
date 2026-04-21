@@ -88,7 +88,7 @@ mod tests {
         let dag = compile_dag(
             r#"
 cfg = config(name="test")
-a = bash_operator("a", cmd="printf '{\"outputs\":{}}'  ")
+a = bash_operator("a", cmd="printf '{\"outputs\":{}}'  ", inputs=[], outputs=[])
 build(cfg, a)
 "#,
         );
@@ -113,7 +113,7 @@ build(cfg, a)
         let dag = compile_dag(
             r#"
 cfg = config(name="test")
-a = bash_operator("a", cmd="exit 1")
+a = bash_operator("a", cmd="exit 1", inputs=[], outputs=[])
 build(cfg, a)
 "#,
         );

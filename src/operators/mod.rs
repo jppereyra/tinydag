@@ -37,6 +37,18 @@ pub trait Operator {
     fn content_for_hash(&self) -> Vec<u8> {
         Vec::new()
     }
+
+    /// Returns the output names this operator declares it will produce.
+    /// Used at compile time to detect fan-in output name collisions.
+    fn declared_outputs(&self) -> &[String] {
+        &[]
+    }
+
+    /// Returns the input names this operator declares it will consume.
+    /// Used at compile time to verify predecessors produce all required inputs.
+    fn declared_inputs(&self) -> &[String] {
+        &[]
+    }
 }
 
 /// How the task is invoked. A tagged union serialized with
@@ -76,6 +88,20 @@ impl Operator for TaskRef {
             TaskRef::Bash(c) => c.content_for_hash(),
         }
     }
+
+    fn declared_outputs(&self) -> &[String] {
+        match self {
+            TaskRef::Python(c) => c.declared_outputs(),
+            TaskRef::Bash(c) => c.declared_outputs(),
+        }
+    }
+
+    fn declared_inputs(&self) -> &[String] {
+        match self {
+            TaskRef::Python(c) => c.declared_inputs(),
+            TaskRef::Bash(c) => c.declared_inputs(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -86,6 +112,26 @@ impl TaskRef {
         TaskRef::Bash(bash::BashOperator {
             cmd: Some("echo ok".to_string()),
             script: None,
+            outputs: vec![],
+            inputs: vec![],
+        })
+    }
+
+    pub(crate) fn stub_with_outputs(outputs: Vec<String>) -> Self {
+        TaskRef::Bash(bash::BashOperator {
+            cmd: Some("echo ok".to_string()),
+            script: None,
+            inputs: vec![],
+            outputs,
+        })
+    }
+
+    pub(crate) fn stub_with_inputs(inputs: Vec<String>) -> Self {
+        TaskRef::Bash(bash::BashOperator {
+            cmd: Some("echo ok".to_string()),
+            script: None,
+            inputs,
+            outputs: vec![],
         })
     }
 }

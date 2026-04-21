@@ -381,7 +381,7 @@ mod tests {
     fn compile_minimal_bash_dag() {
         let src = r#"
 cfg = config(name="my-dag", pipeline_id="my-pipeline")
-n = bash_operator("step1", cmd="echo hello")
+n = bash_operator("step1", cmd="echo hello", inputs=[], outputs=[])
 build(cfg, n)
 "#;
         let dag = compile("test.star", src, None).unwrap();
@@ -394,7 +394,7 @@ build(cfg, n)
     fn compile_trigger_defaults_to_manual() {
         let src = r#"
 cfg = config(name="d")
-n = bash_operator("n", cmd="echo hi")
+n = bash_operator("n", cmd="echo hi", inputs=[], outputs=[])
 build(cfg, n)
 "#;
         let dag = compile("test.star", src, None).unwrap();
@@ -405,7 +405,7 @@ build(cfg, n)
     fn compile_cron_trigger_when_schedule_set() {
         let src = r#"
 cfg = config(name="d", schedule="0 6 * * *")
-n = bash_operator("n", cmd="echo hi")
+n = bash_operator("n", cmd="echo hi", inputs=[], outputs=[])
 build(cfg, n)
 "#;
         let dag = compile("test.star", src, None).unwrap();
@@ -421,10 +421,10 @@ build(cfg, n)
     fn compile_diamond_matches_json() {
         let src = r#"
 cfg = config(name="etl-sample", pipeline_id="sample-pipeline", team="data-eng", user="alice")
-extract = bash_operator("extract", cmd="echo extracting")
-transform_a = bash_operator("transform-a", cmd="echo a", depends_on=extract)
-transform_b = bash_operator("transform-b", cmd="echo b", depends_on=extract)
-loader = bash_operator("load", cmd="echo loading", depends_on=[transform_a, transform_b])
+extract = bash_operator("extract", cmd="echo extracting", inputs=[], outputs=[])
+transform_a = bash_operator("transform-a", cmd="echo a", inputs=[], outputs=[], depends_on=extract)
+transform_b = bash_operator("transform-b", cmd="echo b", inputs=[], outputs=[], depends_on=extract)
+loader = bash_operator("load", cmd="echo loading", inputs=[], outputs=[], depends_on=[transform_a, transform_b])
 build(cfg, loader)
 "#;
         let dag = compile("test.star", src, None).unwrap();
@@ -437,8 +437,8 @@ build(cfg, loader)
     fn compile_depends_on_node_creates_edge() {
         let src = r#"
 cfg = config(name="d")
-a = bash_operator("a", cmd="echo a")
-b = bash_operator("b", cmd="echo b", depends_on=a)
+a = bash_operator("a", cmd="echo a", inputs=[], outputs=[])
+b = bash_operator("b", cmd="echo b", inputs=[], outputs=[], depends_on=a)
 build(cfg, b)
 "#;
         let dag = compile("test.star", src, None).unwrap();
@@ -451,9 +451,9 @@ build(cfg, b)
     fn compile_depends_on_list_creates_edges() {
         let src = r#"
 cfg = config(name="d")
-a = bash_operator("a", cmd="echo a")
-b = bash_operator("b", cmd="echo b")
-c = bash_operator("c", cmd="echo c", depends_on=[a, b])
+a = bash_operator("a", cmd="echo a", inputs=[], outputs=[])
+b = bash_operator("b", cmd="echo b", inputs=[], outputs=[])
+c = bash_operator("c", cmd="echo c", inputs=[], outputs=[], depends_on=[a, b])
 build(cfg, c)
 "#;
         let dag = compile("test.star", src, None).unwrap();
@@ -467,7 +467,7 @@ build(cfg, c)
         std::fs::write(file.path(), "pass\n").unwrap();
         let script = file.path().to_string_lossy().into_owned();
         let src = format!(
-            "cfg = config(name=\"d\")\ns = python_operator(\"step1\", script=\"{script}\")\nbuild(cfg, s)\n"
+            "cfg = config(name=\"d\")\ns = python_operator(\"step1\", script=\"{script}\", inputs=[], outputs=[])\nbuild(cfg, s)\n"
         );
         let dag = compile("test.star", &src, None).unwrap();
         let val = serde_json::to_value(&dag.nodes[0].task_ref).unwrap();
@@ -479,7 +479,7 @@ build(cfg, c)
     fn compile_version_hash_is_set() {
         let src = r#"
 cfg = config(name="d")
-n = bash_operator("n", cmd="echo hi")
+n = bash_operator("n", cmd="echo hi", inputs=[], outputs=[])
 build(cfg, n)
 "#;
         let dag = compile("test.star", src, None).unwrap();
@@ -492,7 +492,7 @@ build(cfg, n)
         // No build() call — last expression is None.
         let src = r#"
 cfg = config(name="d")
-bash_operator("n", cmd="echo hi")
+bash_operator("n", cmd="echo hi", inputs=[], outputs=[])
 "#;
         assert!(compile("test.star", src, None).is_err());
     }
@@ -502,8 +502,8 @@ bash_operator("n", cmd="echo hi")
         // depends_on with a string instead of a task node value.
         let src = r#"
 cfg = config(name="d")
-a = bash_operator("a", cmd="echo a")
-b = bash_operator("b", cmd="echo b", depends_on="a")
+a = bash_operator("a", cmd="echo a", inputs=[], outputs=[])
+b = bash_operator("b", cmd="echo b", inputs=[], outputs=[], depends_on="a")
 build(cfg, b)
 "#;
         assert!(compile("test.star", src, None).is_err());
@@ -514,10 +514,10 @@ build(cfg, b)
         // a is a dependency of both b and c; node a must appear exactly once.
         let src = r#"
 cfg = config(name="d")
-a = bash_operator("a", cmd="echo a")
-b = bash_operator("b", cmd="echo b", depends_on=a)
-c = bash_operator("c", cmd="echo c", depends_on=a)
-d = bash_operator("d", cmd="echo d", depends_on=[b, c])
+a = bash_operator("a", cmd="echo a", inputs=[], outputs=[])
+b = bash_operator("b", cmd="echo b", inputs=[], outputs=[], depends_on=a)
+c = bash_operator("c", cmd="echo c", inputs=[], outputs=[], depends_on=a)
+d = bash_operator("d", cmd="echo d", inputs=[], outputs=[], depends_on=[b, c])
 build(cfg, d)
 "#;
         let dag = compile("test.star", src, None).unwrap();
@@ -529,9 +529,20 @@ build(cfg, d)
     fn compile_error_duplicate_task_id() {
         let src = r#"
 cfg = config(name="d")
-a1 = bash_operator("dup", cmd="echo a")
-a2 = bash_operator("dup", cmd="echo b")
-b = bash_operator("b", cmd="echo b", depends_on=[a1, a2])
+a1 = bash_operator("dup", cmd="echo a", inputs=[], outputs=[])
+a2 = bash_operator("dup", cmd="echo b", inputs=[], outputs=[])
+b = bash_operator("b", cmd="echo b", inputs=[], outputs=[], depends_on=[a1, a2])
+build(cfg, b)
+"#;
+        assert!(compile("test.star", src, None).is_err());
+    }
+
+    #[test]
+    fn compile_error_unsatisfied_input() {
+        let src = r#"
+cfg = config(name="d")
+a = bash_operator("a", cmd="echo a", inputs=[], outputs=[])
+b = bash_operator("b", cmd="echo b", inputs=["missing"], outputs=[], depends_on=a)
 build(cfg, b)
 "#;
         assert!(compile("test.star", src, None).is_err());

@@ -158,15 +158,17 @@ async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunE
         for node_id in ready.drain(..) {
             let node = dag.nodes.iter().find(|n| n.id == node_id).unwrap().clone();
 
-            // Gather inputs: merge outputs from all predecessor nodes.
-            // Duplicate output names across predecessors are a hard error.
+            // Gather inputs: forward only outputs that the node declared as inputs.
+            let declared_inputs = node.task_ref.declared_inputs();
             let mut inputs: HashMap<String, Value> = HashMap::new();
             for edge in dag.edges.iter().filter(|e| e.to == node_id) {
                 for (output_name, value) in
                     outputs.get(edge.from.as_str()).cloned().unwrap_or_default()
                 {
+                    if !declared_inputs.iter().any(|s| s == &output_name) {
+                        continue;
+                    }
                     if inputs.contains_key(&output_name) {
-                        // Drain in-flight before returning so tasks don't leak.
                         for _ in 0..in_flight {
                             let _ = rx.recv().await;
                         }
@@ -326,7 +328,7 @@ mod tests {
         let dag = compile_dag(
             r#"
 cfg = config(name="test")
-a = bash_operator("a", cmd="true")
+a = bash_operator("a", cmd="true", inputs=[], outputs=[])
 build(cfg, a)
 "#,
         );
@@ -344,7 +346,7 @@ build(cfg, a)
         let dag = compile_dag(
             r#"
 cfg = config(name="test")
-a = bash_operator("a", cmd="exit 1")
+a = bash_operator("a", cmd="exit 1", inputs=[], outputs=[])
 build(cfg, a)
 "#,
         );
@@ -362,9 +364,9 @@ build(cfg, a)
         let dag = compile_dag(
             r#"
 cfg = config(name="chain")
-a = bash_operator("a", cmd="true")
-b = bash_operator("b", cmd="true", depends_on=a)
-c = bash_operator("c", cmd="true", depends_on=b)
+a = bash_operator("a", cmd="true", inputs=[], outputs=[])
+b = bash_operator("b", cmd="true", inputs=[], outputs=[], depends_on=a)
+c = bash_operator("c", cmd="true", inputs=[], outputs=[], depends_on=b)
 build(cfg, c)
 "#,
         );
@@ -391,10 +393,10 @@ build(cfg, c)
         let dag = compile_dag(
             r#"
 cfg = config(name="diamond")
-a = bash_operator("a", cmd="true")
-b = bash_operator("b", cmd="true", depends_on=a)
-c = bash_operator("c", cmd="true", depends_on=a)
-d = bash_operator("d", cmd="true", depends_on=[b, c])
+a = bash_operator("a", cmd="true", inputs=[], outputs=[])
+b = bash_operator("b", cmd="true", inputs=[], outputs=[], depends_on=a)
+c = bash_operator("c", cmd="true", inputs=[], outputs=[], depends_on=a)
+d = bash_operator("d", cmd="true", inputs=[], outputs=[], depends_on=[b, c])
 build(cfg, d)
 "#,
         );
@@ -417,28 +419,31 @@ build(cfg, d)
         assert!(pos["c"] < pos["d"]);
     }
 
-    #[tokio::test]
-    async fn duplicate_output_name_is_an_error() {
-        // a and b both produce name "x"; c depends on both — should fail.
-        let dag = compile_dag(
+    #[test]
+    fn duplicate_output_name_is_an_error() {
+        // a and b both declare output "x"; c depends on both — caught at compile time.
+        let result = crate::compiler::compile(
+            "test.star",
             r#"
 cfg = config(name="dup")
-a = bash_operator("a", cmd="printf '{\"outputs\":{\"x\":1}}' > tinydag_outputs.json")
-b = bash_operator("b", cmd="printf '{\"outputs\":{\"x\":2}}' > tinydag_outputs.json")
-c = bash_operator("c", cmd="true", depends_on=[a, b])
+a = bash_operator("a",
+    cmd="printf '{\"outputs\":{\"x\":1}}' > tinydag_outputs.json",
+    inputs=[], outputs=["x"])
+b = bash_operator("b",
+    cmd="printf '{\"outputs\":{\"x\":2}}' > tinydag_outputs.json",
+    inputs=[], outputs=["x"])
+c = bash_operator("c", cmd="true", inputs=["x"], outputs=[], depends_on=[a, b])
 build(cfg, c)
 "#,
+            None,
         );
-        let err = run(RunConfig {
-            dag,
-            executor: bash_executor().await,
-        })
-        .await
-        .unwrap_err();
         assert!(
-            matches!(&err, RunError::DuplicateOutput { node_id, output_name }
-                if node_id == "c" && output_name == "x"),
-            "unexpected error: {err:?}"
+            matches!(&result, Err(crate::compiler::CompileError::Validation(errs))
+            if errs.iter().any(|e| matches!(e,
+                crate::validation::ValidationError::FanInOutputConflict { node_id, output_name, .. }
+                if node_id == "c" && output_name == "x"
+            ))),
+            "unexpected result: {result:?}"
         );
     }
 
@@ -448,9 +453,9 @@ build(cfg, c)
         let dag = compile_dag(
             r#"
 cfg = config(name="merge")
-a = bash_operator("a", cmd="printf '{\"outputs\":{\"x\":1}}' > tinydag_outputs.json")
-b = bash_operator("b", cmd="printf '{\"outputs\":{\"y\":2}}' > tinydag_outputs.json")
-c = bash_operator("c", cmd="true", depends_on=[a, b])
+a = bash_operator("a", cmd="printf '{\"outputs\":{\"x\":1}}' > tinydag_outputs.json", inputs=[], outputs=["x"])
+b = bash_operator("b", cmd="printf '{\"outputs\":{\"y\":2}}' > tinydag_outputs.json", inputs=[], outputs=["y"])
+c = bash_operator("c", cmd="true", inputs=["x", "y"], outputs=[], depends_on=[a, b])
 build(cfg, c)
 "#,
         );

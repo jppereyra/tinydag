@@ -65,6 +65,14 @@ impl Operator for PythonOperator {
         "python"
     }
 
+    fn declared_outputs(&self) -> &[String] {
+        &self.outputs
+    }
+
+    fn declared_inputs(&self) -> &[String] {
+        &self.inputs
+    }
+
     fn content_for_hash(&self) -> Vec<u8> {
         // Safe to read: content_for_hash is called after validate(), which already
         // confirmed the script exists and is readable.
@@ -79,8 +87,8 @@ pub fn register_globals(builder: &mut GlobalsBuilder) {
     fn python_operator<'v>(
         task_id: &str,
         #[starlark(require = named)] script: &str,
-        #[starlark(require = named, default = NoneType)] inputs: Value<'v>,
-        #[starlark(require = named, default = NoneType)] outputs: Value<'v>,
+        #[starlark(require = named)] inputs: Value<'v>,
+        #[starlark(require = named)] outputs: Value<'v>,
         #[starlark(require = named, default = NoneType)] depends_on: Value<'v>,
         #[starlark(require = named, default = NoneType)] timeout_secs: Value<'v>,
         #[starlark(require = named, default = 1i32)] max_attempts: i32,
@@ -336,6 +344,19 @@ mod tests {
     // -----------------------------------------------------------------------
     // Structural validation
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn serialization_roundtrip() {
+        use crate::operators::TaskRef;
+        let task_ref = TaskRef::Python(PythonOperator {
+            script: "mymodule/extract.py".to_string(),
+            inputs: vec![],
+            outputs: vec!["raw".to_string()],
+        });
+        let json = serde_json::to_string(&task_ref).unwrap();
+        let back: TaskRef = serde_json::from_str(&json).unwrap();
+        assert_eq!(task_ref, back);
+    }
 
     #[test]
     fn empty_script_is_invalid() {

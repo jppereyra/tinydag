@@ -392,7 +392,7 @@ mod tests {
     /// Build a bash dispatch payload whose cmd drives the operator's behaviour.
     fn bash_payload(id: &str, cmd: &str, timeout: Option<u64>) -> DispatchPayload {
         let src = format!(
-            "cfg = config(name=\"test\")\nn = bash_operator({id:?}, cmd={cmd:?})\nbuild(cfg, n)\n"
+            "cfg = config(name=\"test\")\nn = bash_operator({id:?}, cmd={cmd:?}, inputs=[], outputs=[])\nbuild(cfg, n)\n"
         );
         let dag = crate::compiler::compile("test.star", &src, None).unwrap();
         let node = dag.nodes().iter().find(|n| n.id == id).unwrap().clone();
