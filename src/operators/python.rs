@@ -203,9 +203,9 @@ mod tests {
             .parent()
             .unwrap()
             .join("tinydag-op-python");
-        // SAFETY: tests run in separate processes; no other threads access env at this point.
-        unsafe { std::env::set_var("TINYDAG_OP_PYTHON", &binary) };
-        crate::executor::LocalExecutor::new().await
+        crate::executor::LocalExecutor::new()
+            .await
+            .with_op_binary("python", binary.to_string_lossy())
     }
 
     fn python_payload(node_id: &str, script: &str) -> crate::executor::DispatchPayload {

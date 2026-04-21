@@ -310,9 +310,11 @@ mod tests {
             .parent()
             .unwrap() // …/debug
             .join("tinydag-op-bash");
-        // SAFETY: tests run in separate processes; no other threads access env at this point.
-        unsafe { std::env::set_var("TINYDAG_OP_BASH", &binary) };
-        Arc::new(LocalExecutor::new().await)
+        Arc::new(
+            LocalExecutor::new()
+                .await
+                .with_op_binary("bash", binary.to_string_lossy()),
+        )
     }
 
     fn compile_dag(src: &str) -> DagDef {

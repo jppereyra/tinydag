@@ -128,12 +128,14 @@ pub trait Executor: Send + Sync + 'static {
 
 /// Runs tasks by spawning operator binaries as child processes on the local machine.
 ///
-/// The binary for operator type `X` is resolved from the `TINYDAG_OP_<X>`
+/// The binary for operator type `X` is resolved first from the in-process map
+/// (set via [`LocalExecutor::with_op_binary`]), then from the `TINYDAG_OP_<X>`
 /// environment variable (e.g. `TINYDAG_OP_BASH=/usr/local/bin/tinydag-op-bash`).
 pub struct LocalExecutor {
     /// How long to wait between heartbeats before declaring a task stuck.
     pub heartbeat_timeout_secs: u64,
     control_server: std::sync::Arc<crate::control_server::ControlServer>,
+    op_binaries: HashMap<String, String>,
 }
 
 impl LocalExecutor {
@@ -146,7 +148,16 @@ impl LocalExecutor {
         LocalExecutor {
             heartbeat_timeout_secs: 90,
             control_server,
+            op_binaries: HashMap::new(),
         }
+    }
+
+    /// Override the binary path for an operator type (e.g. `"bash"`).
+    /// Takes precedence over the `TINYDAG_OP_<X>` environment variable.
+    pub fn with_op_binary(mut self, operator: &str, path: impl Into<String>) -> Self {
+        self.op_binaries
+            .insert(operator.to_ascii_uppercase(), path.into());
+        self
     }
 }
 
@@ -165,12 +176,16 @@ impl Executor for LocalExecutor {
         let start = Instant::now();
         let operator = payload.task_ref.type_name();
 
-        let env_key = format!("TINYDAG_OP_{}", operator.to_ascii_uppercase());
-        let binary =
-            std::env::var(&env_key).map_err(|_| ExecutorError::OperatorBinaryNotFound {
+        let op_upper = operator.to_ascii_uppercase();
+        let binary = self
+            .op_binaries
+            .get(&op_upper)
+            .cloned()
+            .or_else(|| std::env::var(format!("TINYDAG_OP_{op_upper}")).ok())
+            .ok_or_else(|| ExecutorError::OperatorBinaryNotFound {
                 node_id: payload.node_id.clone(),
                 operator: operator.to_string(),
-                operator_upper: operator.to_ascii_uppercase(),
+                operator_upper: op_upper,
             })?;
 
         let result = self.spawn_operator(&binary, &payload).await;
@@ -357,9 +372,9 @@ mod tests {
             .parent()
             .unwrap() // …/debug
             .join("tinydag-op-bash");
-        // SAFETY: tests run in separate processes; no other threads access env at this point.
-        unsafe { std::env::set_var("TINYDAG_OP_BASH", &binary) };
-        LocalExecutor::new().await
+        LocalExecutor::new()
+            .await
+            .with_op_binary("bash", binary.to_string_lossy())
     }
 
     fn test_run_context() -> RunContext {
