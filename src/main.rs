@@ -4,6 +4,59 @@ use tinydag::compiler::CompileError;
 use tinydag::executor::LocalExecutor;
 use tinydag::runner::RunError;
 
+/// Discover `tinydag-op-*` binaries that live alongside the current executable.
+///
+/// Returns `(OPERATOR_UPPERCASE, binary_path)` pairs.  Any operator whose
+/// `TINYDAG_OP_<NAME>` environment variable is already set is skipped so that
+/// explicit env-var overrides always take precedence over auto-discovery.
+fn discover_op_binaries() -> Vec<(String, String)> {
+    let Ok(exe) = std::env::current_exe() else {
+        return vec![];
+    };
+    let Some(dir) = exe.parent() else {
+        return vec![];
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return vec![];
+    };
+
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        let Some(op) = name_str.strip_prefix("tinydag-op-") else {
+            continue;
+        };
+        if op.is_empty() {
+            continue;
+        }
+
+        let op_upper = op.to_ascii_uppercase();
+
+        // Env var beats auto-discovery.
+        if std::env::var(format!("TINYDAG_OP_{op_upper}")).is_ok() {
+            continue;
+        }
+
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+
+        // On Unix, skip files that aren't executable.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            if meta.permissions().mode() & 0o111 == 0 {
+                continue;
+            }
+        }
+
+        found.push((op_upper, entry.path().to_string_lossy().into_owned()));
+    }
+    found
+}
+
 #[tokio::main]
 async fn main() {
     let providers = tinydag::telemetry::init();
@@ -126,7 +179,11 @@ async fn cmd_add(args: &[String]) -> i32 {
 
     let dag_id = dag.dag_id().to_string();
     let node_count = dag.nodes().len();
-    let executor = Arc::new(LocalExecutor::new().await);
+    let mut executor = LocalExecutor::new().await;
+    for (op, path) in discover_op_binaries() {
+        executor = executor.with_op_binary(&op, path);
+    }
+    let executor = Arc::new(executor);
     let scheduler = tinydag::scheduler::Scheduler::new(executor);
     scheduler.register(dag);
 
