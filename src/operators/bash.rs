@@ -3,8 +3,12 @@
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use starlark::environment::GlobalsBuilder;
+use starlark::starlark_module;
+use starlark::values::Value;
+use starlark::values::none::NoneType;
 
-use super::Operator;
+use super::{Operator, TaskNode, unpack_depends_on, unpack_optional_string, unpack_optional_u64};
 
 /// Config for a Bash task.
 ///
@@ -70,6 +74,53 @@ impl Operator for BashOperator {
 
     fn type_name(&self) -> &'static str {
         "bash"
+    }
+
+    fn content_for_hash(&self) -> Vec<u8> {
+        if let Some(cmd) = &self.cmd {
+            return cmd.as_bytes().to_vec();
+        }
+        if let Some(path) = &self.script {
+            return std::fs::read(path).unwrap_or_default();
+        }
+        Vec::new()
+    }
+}
+
+/// Registers `bash_operator()` as a Starlark global.
+#[starlark_module]
+pub fn register_globals(builder: &mut GlobalsBuilder) {
+    fn bash_operator<'v>(
+        task_id: &str,
+        #[starlark(require = named, default = NoneType)] cmd: Value<'v>,
+        #[starlark(require = named, default = NoneType)] script: Value<'v>,
+        #[starlark(require = named, default = NoneType)] depends_on: Value<'v>,
+        #[starlark(require = named, default = NoneType)] timeout_secs: Value<'v>,
+        #[starlark(require = named, default = 1i32)] max_attempts: i32,
+        #[starlark(require = named, default = 0i32)] delay_secs: i32,
+    ) -> anyhow::Result<TaskNode<'v>> {
+        let cmd_opt = unpack_optional_string(cmd, "cmd")?;
+        let script_opt = unpack_optional_string(script, "script")?;
+        match (&cmd_opt, &script_opt) {
+            (None, None) => anyhow::bail!("bash_operator requires 'cmd' or 'script'"),
+            (Some(_), Some(_)) => {
+                anyhow::bail!("bash_operator accepts at most one of 'cmd' or 'script'")
+            }
+            _ => {}
+        }
+        let deps = unpack_depends_on(depends_on)?;
+        let timeout = unpack_optional_u64(timeout_secs, "timeout_secs")?;
+        Ok(TaskNode {
+            task_id: task_id.to_owned(),
+            task_ref: super::TaskRef::Bash(BashOperator {
+                cmd: cmd_opt,
+                script: script_opt,
+            }),
+            depends_on: deps,
+            max_attempts: max_attempts.max(1) as u32,
+            delay_secs: delay_secs.max(0) as u64,
+            timeout_secs: timeout,
+        })
     }
 }
 

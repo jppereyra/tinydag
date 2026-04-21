@@ -185,15 +185,11 @@ fn validate_inner(dag: &DagDef) -> Result<Vec<NodeId>, Vec<ValidationError>> {
 mod tests {
     use super::*;
     use crate::dag::{DagDef, Edge, Node, RetryPolicy, TaskRef};
-    use crate::operators::BashOperator;
 
     fn bash_node(id: &str) -> Node {
         Node {
             id: id.to_string(),
-            task_ref: TaskRef::Bash(BashOperator {
-                cmd: Some("echo ok".to_string()),
-                script: None,
-            }),
+            task_ref: TaskRef::stub(),
             retry: RetryPolicy::default(),
             timeout_secs: None,
         }
@@ -310,10 +306,7 @@ mod tests {
         for id in &["extract", "clean", "load"] {
             dag.nodes.push(Node {
                 id: id.to_string(),
-                task_ref: TaskRef::Bash(BashOperator {
-                    cmd: Some("echo ok".to_string()),
-                    script: None,
-                }),
+                task_ref: TaskRef::stub(),
                 retry: RetryPolicy::default(),
                 timeout_secs: None,
             });

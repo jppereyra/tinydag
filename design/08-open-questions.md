@@ -8,36 +8,21 @@ leaving them implicit in code comments or TODOs.
 
 ## 1. Open vs Closed Operator Set
 
-`TaskRef` is a closed enum. Adding an operator requires touching `TaskRef`,
-the `Operator` trait impl, and the `executor` registry.
+**Resolved for now:** `TaskRef` is a closed enum living in `src/operators/mod.rs`.
+Adding an operator means adding a variant to the enum, a file in `src/operators/`,
+and one line to `all_operator_globals()`. The engine (`compiler.rs`, `dag.rs`,
+`executor.rs`) never imports concrete operator types directly.
 
-This is correct for a schema-versioned, library-embedded DAG engine but it
-breaks down if community-authored operators need to be loaded at runtime without
-recompiling tinydag.
-
-The alternative is using`Box<dyn Operator> + typetag::serde` for open dispatch.
-Which costs us heap allocation per node, loss of `Clone` and `PartialEq` on
-`TaskRef`, need for `dyn_clone`.
-
-I think we'll need to review this before we add the next operator, tbh.
+The operator code is cleanly isolated in `src/operators/` and designed to be
+extracted into a separate crate if it becomes necessary.
 
 ---
 
 ## 2. Output Protocol: Stdout vs File
 
-**Current decision:** Operator scripts emit `{"outputs": {"key": value}}` on stdout.
-The operator binary captures this and reports it to the control server.
+**Resolved:** Outputs are written to `tinydag_outputs.json` in the work directory,
+symmetric with `tinydag_inputs.json`. Stdout is a pure logging channel.
 
-**The problem:** Any stray `print()` from the script or any library it imports corrupts
-the JSON. This is a constant source of user friction in practice. The failure mode is
-an opaque parse error with no indication of what the stray output was.
-
-**Alternative:** Outputs written to `tinydag_outputs.json` in the work directory,
-symmetric with `tinydag_inputs.json`. Stdout becomes a pure logging channel.
-
-**Tradeoff:** The file-based approach is more robust but requires user scripts to
-explicitly know about tinydag's file conventions. Stdout is more natural for quick
-one-liners.
 
 
 ---

@@ -4,29 +4,35 @@
 //! Runs structural + validation checks at compile time and computes a
 //! deterministic version hash on the resulting artifact.
 
-use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, VecDeque};
+use std::fmt;
 use std::path::Path;
 
+use allocative::Allocative;
 use anyhow::anyhow;
 use starlark::any::ProvidesStaticType;
-use starlark::environment::{Globals, GlobalsBuilder, Module};
+use starlark::environment::{GlobalsBuilder, Module};
 use starlark::eval::Evaluator;
 use starlark::starlark_module;
+use starlark::starlark_simple_value;
 use starlark::syntax::{AstModule, Dialect};
-use starlark::values::Value;
 use starlark::values::dict::DictRef;
 use starlark::values::list::ListRef;
 use starlark::values::none::NoneType;
+use starlark::values::starlark_value;
+use starlark::values::{NoSerialize, StarlarkValue, Value, ValueLike};
 
-use crate::dag::{DagDef, Edge, Node, RetryPolicy, TaskRef, Trigger};
-use crate::operators::{BashOperator, Operator as _, PythonOperator};
+use crate::dag::{DagDef, Edge, Node, RetryPolicy, Trigger};
+use crate::operators::{FrozenTaskNode, Operator as _, TaskNode, is_task_node};
+use crate::validation::ValidationError;
+use starlark::values::FrozenValue;
 
 // ---------------------------------------------------------------------------
-// Internal types
+// PipelineConfig — Starlark value returned by config()
 // ---------------------------------------------------------------------------
 
-struct DagConfig {
+#[derive(Debug, ProvidesStaticType, NoSerialize)]
+struct PipelineConfig {
     dag_id: String,
     pipeline_id: String,
     team: String,
@@ -35,26 +41,46 @@ struct DagConfig {
     params: HashMap<String, serde_json::Value>,
 }
 
-struct OperatorDef {
-    task_id: String,
-    task_ref: TaskRef,
-    retry: RetryPolicy,
-    timeout_secs: Option<u64>,
+impl allocative::Allocative for PipelineConfig {
+    fn visit<'a, 'b: 'a>(&self, visitor: &'a mut allocative::Visitor<'b>) {
+        visitor.visit_simple_sized::<Self>();
+    }
 }
 
-// ---------------------------------------------------------------------------
-// DagCollector — accumulates everything the DSL declares
-// ---------------------------------------------------------------------------
-
-#[derive(Default, ProvidesStaticType)]
-struct DagCollector {
-    dag_config: RefCell<Option<DagConfig>>,
-    operators: RefCell<Vec<OperatorDef>>,
-    edges: RefCell<Vec<(String, String)>>,
+impl fmt::Display for PipelineConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<PipelineConfig {}>", self.dag_id)
+    }
 }
 
+starlark_simple_value!(PipelineConfig);
+
+#[starlark_value(type = "PipelineConfig")]
+impl<'v> StarlarkValue<'v> for PipelineConfig {}
+
 // ---------------------------------------------------------------------------
-// Public error type
+// BuiltDag — Starlark value returned by build()
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
+struct BuiltDag {
+    #[allocative(skip)]
+    dag_def: DagDef,
+}
+
+impl fmt::Display for BuiltDag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<BuiltDag {}>", self.dag_def.dag_id)
+    }
+}
+
+starlark_simple_value!(BuiltDag);
+
+#[starlark_value(type = "BuiltDag")]
+impl<'v> StarlarkValue<'v> for BuiltDag {}
+
+// ---------------------------------------------------------------------------
+// CompileError
 // ---------------------------------------------------------------------------
 
 pub enum CompileError {
@@ -62,13 +88,13 @@ pub enum CompileError {
     Validation(Vec<crate::validation::ValidationError>),
 }
 
-impl std::fmt::Display for CompileError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for CompileError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CompileError::Eval(e) => write!(f, "{e}"),
+            CompileError::Eval(e) => write!(f, "eval error: {e}"),
             CompileError::Validation(errs) => {
                 for e in errs {
-                    writeln!(f, "{e}")?;
+                    writeln!(f, "validation error: {e}")?;
                 }
                 Ok(())
             }
@@ -76,9 +102,9 @@ impl std::fmt::Display for CompileError {
     }
 }
 
-impl std::fmt::Debug for CompileError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(self, f)
+impl fmt::Debug for CompileError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
     }
 }
 
@@ -89,193 +115,133 @@ impl From<anyhow::Error> for CompileError {
 }
 
 // ---------------------------------------------------------------------------
-// Private helpers
+// Starlark value helpers
 // ---------------------------------------------------------------------------
 
-/// Accept a Starlark `None`, a single string, or a list of strings.
-/// Returns an owned `Vec<String>` (empty when `None`).
-fn unpack_string_or_list<'v>(v: Value<'v>, name: &str) -> anyhow::Result<Vec<String>> {
-    if v.is_none() {
-        return Ok(vec![]);
-    }
-    if let Some(s) = v.unpack_str() {
-        return Ok(vec![s.to_owned()]);
-    }
-    unpack_string_list(v, name)
-}
-
-/// Accept a Starlark `None` or a list of strings.
-/// Returns an owned `Vec<String>` (empty when `None`).
-fn unpack_string_list<'v>(v: Value<'v>, name: &str) -> anyhow::Result<Vec<String>> {
-    if v.is_none() {
-        return Ok(vec![]);
-    }
-    if let Some(list) = ListRef::from_value(v) {
-        let mut result = Vec::new();
-        for item in list.iter() {
-            match item.unpack_str() {
-                Some(s) => result.push(s.to_owned()),
-                None => {
-                    return Err(anyhow!(
-                        "'{name}' must be a list of strings, got non-string element"
-                    ));
-                }
-            }
-        }
-        return Ok(result);
-    }
-    Err(anyhow!(
-        "'{name}' must be a string or list of strings, got {}",
-        v.get_type()
-    ))
-}
-
-/// Accept a Starlark `None` or a positive integer; returns `Option<u64>`.
-fn unpack_optional_u64<'v>(v: Value<'v>, name: &str) -> anyhow::Result<Option<u64>> {
-    if v.is_none() {
-        return Ok(None);
-    }
-    if let Some(i) = v.unpack_i32() {
-        if i > 0 {
-            return Ok(Some(i as u64));
-        }
-        return Err(anyhow!("'{name}' must be a positive integer, got {i}"));
-    }
-    Err(anyhow!("'{name}' must be an integer or None"))
-}
-
-/// Recursively convert a Starlark value to a `serde_json::Value`.
-/// Supported types: None, bool, int (i32 range), string, list, dict with string keys.
-fn starlark_to_json<'v>(v: Value<'v>) -> anyhow::Result<serde_json::Value> {
-    if v.is_none() {
-        return Ok(serde_json::Value::Null);
-    }
-    if let Some(b) = v.unpack_bool() {
-        return Ok(serde_json::Value::Bool(b));
-    }
-    if let Some(i) = v.unpack_i32() {
-        return Ok(serde_json::json!(i));
-    }
-    if let Some(s) = v.unpack_str() {
-        return Ok(serde_json::Value::String(s.to_owned()));
-    }
-    if let Some(list) = ListRef::from_value(v) {
-        let items: anyhow::Result<Vec<_>> = list.iter().map(starlark_to_json).collect();
-        return Ok(serde_json::Value::Array(items?));
-    }
-    if let Some(dict) = DictRef::from_value(v) {
-        let mut map = serde_json::Map::new();
-        for (k, val) in dict.iter() {
-            let key = k
-                .unpack_str()
-                .ok_or_else(|| anyhow!("params dict keys must be strings"))?;
-            map.insert(key.to_owned(), starlark_to_json(val)?);
-        }
-        return Ok(serde_json::Value::Object(map));
-    }
-    Err(anyhow!(
-        "unsupported param value type '{}' in params dict",
-        v.get_type()
-    ))
-}
-
-/// Convert a Starlark `None` or dict-with-string-keys into a JSON params map.
-fn unpack_params<'v>(v: Value<'v>) -> anyhow::Result<HashMap<String, serde_json::Value>> {
-    if v.is_none() {
-        return Ok(HashMap::new());
-    }
-    if let Some(dict) = DictRef::from_value(v) {
-        let mut map = HashMap::new();
-        for (k, val) in dict.iter() {
-            let key = k
-                .unpack_str()
-                .ok_or_else(|| anyhow!("'params' dict keys must be strings"))?;
-            map.insert(key.to_owned(), starlark_to_json(val)?);
-        }
-        return Ok(map);
-    }
-    Err(anyhow!("'params' must be a dict or None"))
-}
-
 // ---------------------------------------------------------------------------
-// register_operator — shared by python_operator and bash_operator
+// Graph traversal for build()
 // ---------------------------------------------------------------------------
 
-fn register_operator(
-    collector: &DagCollector,
-    task_id: &str,
-    task_ref: TaskRef,
-    retry: RetryPolicy,
-    timeout_secs: Option<u64>,
-    depends_on_val: Value<'_>,
-) -> anyhow::Result<String> {
-    let depends_on = unpack_string_or_list(depends_on_val, "depends_on")?;
-
-    // Validate against already-registered task IDs (forward references are errors).
+/// Downcast a `Value` to a `TaskNode<'v>`, normalizing both live and frozen forms.
+fn downcast_task_node<'v>(v: Value<'v>) -> anyhow::Result<TaskNode<'v>> {
+    if let Some(n) = v.downcast_ref::<TaskNode<'v>>() {
+        return Ok(TaskNode {
+            task_id: n.task_id.clone(),
+            task_ref: n.task_ref.clone(),
+            depends_on: n.depends_on.clone(),
+            max_attempts: n.max_attempts,
+            delay_secs: n.delay_secs,
+            timeout_secs: n.timeout_secs,
+        });
+    }
+    if let Some(frozen) = v.unpack_frozen()
+        && let Some(n) = frozen.downcast_ref::<FrozenTaskNode>()
     {
-        let operators = collector.operators.borrow();
-        let known_ids: HashSet<&str> = operators.iter().map(|op| op.task_id.as_str()).collect();
+        return Ok(TaskNode {
+            task_id: n.task_id.clone(),
+            task_ref: n.task_ref.clone(),
+            depends_on: n
+                .depends_on
+                .iter()
+                .map(|fv: &FrozenValue| fv.to_value())
+                .collect(),
+            max_attempts: n.max_attempts,
+            delay_secs: n.delay_secs,
+            timeout_secs: n.timeout_secs,
+        });
+    }
+    Err(anyhow!(
+        "expected a task node (python_operator or bash_operator result), got {}",
+        v.get_type()
+    ))
+}
 
-        if known_ids.contains(task_id) {
-            return Err(anyhow!("duplicate task_id: '{task_id}'"));
-        }
-
-        for dep in depends_on.iter() {
-            if !known_ids.contains(dep.as_str()) {
+/// Accepts a single `TaskNode` value or a list of `TaskNode` values.
+fn unpack_task_node_list<'v>(v: Value<'v>) -> anyhow::Result<Vec<Value<'v>>> {
+    if is_task_node(v) {
+        return Ok(vec![v]);
+    }
+    if let Some(list) = ListRef::from_value(v) {
+        for item in list.iter() {
+            if !is_task_node(item) {
                 return Err(anyhow!(
-                    "task '{task_id}' depends_on unknown or forward-referenced task '{dep}'"
+                    "build() terminals must be task nodes, got {}",
+                    item.get_type()
                 ));
             }
         }
+        return Ok(list.iter().collect());
+    }
+    Err(anyhow!(
+        "build() second argument must be a task node or list of task nodes, got {}",
+        v.get_type()
+    ))
+}
+
+/// BFS traversal from terminal nodes, collecting all reachable `Node`s and `Edge`s.
+///
+/// Duplicate `task_id` from two distinct `TaskNode` objects is an error.
+/// The same object reachable via multiple paths (structural sharing in a diamond) is fine.
+fn collect_graph<'v>(terminals: Vec<Value<'v>>) -> anyhow::Result<(Vec<Node>, Vec<Edge>)> {
+    let mut seen: HashMap<String, Value<'v>> = HashMap::new();
+    let mut nodes: Vec<Node> = Vec::new();
+    let mut edges: Vec<Edge> = Vec::new();
+    let mut queue: VecDeque<(Value<'v>, Option<String>)> = VecDeque::new();
+
+    for t in terminals {
+        queue.push_back((t, None));
     }
 
-    {
-        let mut edges = collector.edges.borrow_mut();
-        for dep in depends_on.iter() {
-            edges.push((dep.clone(), task_id.to_owned()));
+    while let Some((v, child_id)) = queue.pop_front() {
+        let n = downcast_task_node(v)?;
+
+        if let Some(cid) = child_id {
+            edges.push(Edge {
+                from: n.task_id.clone(),
+                to: cid,
+            });
+        }
+
+        if let Some(existing) = seen.get(&n.task_id) {
+            if !existing.ptr_eq(v) {
+                anyhow::bail!("duplicate task_id: '{}'", n.task_id);
+            }
+            continue; // same object reachable via multiple paths — OK
+        }
+        seen.insert(n.task_id.clone(), v);
+        nodes.push(Node {
+            id: n.task_id.clone(),
+            task_ref: n.task_ref,
+            retry: RetryPolicy {
+                max_attempts: n.max_attempts,
+                delay_secs: n.delay_secs,
+            },
+            timeout_secs: n.timeout_secs,
+        });
+
+        for dep in n.depends_on {
+            queue.push_back((dep, Some(n.task_id.clone())));
         }
     }
 
-    {
-        let mut operators = collector.operators.borrow_mut();
-        operators.push(OperatorDef {
-            task_id: task_id.to_owned(),
-            task_ref,
-            retry,
-            timeout_secs,
-        });
-    }
-
-    Ok(task_id.to_owned())
+    Ok((nodes, edges))
 }
 
 // ---------------------------------------------------------------------------
 // DSL globals
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
 #[starlark_module]
-fn dag_globals(builder: &mut GlobalsBuilder) {
-    /// Declare DAG metadata. Must be called exactly once per file.
-    fn dag<'v>(
-        dag_id: &str,
+fn dag_compiler_globals(builder: &mut GlobalsBuilder) {
+    /// Declare pipeline metadata. Returns a PipelineConfig value.
+    fn config<'v>(
+        name: &str,
         #[starlark(require = named, default = "")] pipeline_id: &str,
         #[starlark(require = named, default = "")] team: &str,
         #[starlark(require = named, default = "")] user: &str,
         #[starlark(require = named, default = NoneType)] schedule: Value<'v>,
         #[starlark(require = named, default = NoneType)] params: Value<'v>,
-        eval: &mut Evaluator<'v, '_, '_>,
-    ) -> anyhow::Result<NoneType> {
-        let collector = eval
-            .extra
-            .and_then(|e| e.downcast_ref::<DagCollector>())
-            .ok_or_else(|| anyhow!("internal: DagCollector not set"))?;
-
-        let mut cfg = collector.dag_config.borrow_mut();
-        if cfg.is_some() {
-            return Err(anyhow!("dag() was called more than once"));
-        }
-
+    ) -> anyhow::Result<PipelineConfig> {
         let schedule = if schedule.is_none() {
             None
         } else if let Some(s) = schedule.unpack_str() {
@@ -283,204 +249,111 @@ fn dag_globals(builder: &mut GlobalsBuilder) {
         } else {
             return Err(anyhow!("'schedule' must be a string or None"));
         };
-
-        let params_map = unpack_params(params)?;
-
-        *cfg = Some(DagConfig {
-            dag_id: dag_id.to_owned(),
+        let params = if params.is_none() {
+            HashMap::new()
+        } else if DictRef::from_value(params).is_some() {
+            let json = serde_json::to_value(params).map_err(|e| anyhow!("'params': {e}"))?;
+            json.as_object()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        } else {
+            return Err(anyhow!("'params' must be a dict or None"));
+        };
+        Ok(PipelineConfig {
+            dag_id: name.to_owned(),
             pipeline_id: pipeline_id.to_owned(),
             team: team.to_owned(),
             user: user.to_owned(),
             schedule,
-            params: params_map,
-        });
-
-        Ok(NoneType)
+            params,
+        })
     }
 
-    /// Register a Python script task. Returns the task_id string so it can
-    /// be passed as a `depends_on` argument to downstream tasks.
-    fn python_operator<'v>(
-        task_id: &str,
-        #[starlark(require = named)] script: &str,
-        #[starlark(require = named, default = NoneType)] inputs: Value<'v>,
-        #[starlark(require = named, default = NoneType)] outputs: Value<'v>,
-        #[starlark(require = named, default = NoneType)] depends_on: Value<'v>,
-        #[starlark(require = named, default = NoneType)] timeout_secs: Value<'v>,
-        #[starlark(require = named, default = 1i32)] max_attempts: i32,
-        #[starlark(require = named, default = 0i32)] delay_secs: i32,
-        eval: &mut Evaluator<'v, '_, '_>,
-    ) -> anyhow::Result<String> {
-        let collector = eval
-            .extra
-            .and_then(|e| e.downcast_ref::<DagCollector>())
-            .ok_or_else(|| anyhow!("internal: DagCollector not set"))?;
-
-        let inputs_vec = unpack_string_list(inputs, "inputs")?;
-        let outputs_vec = unpack_string_list(outputs, "outputs")?;
-        let timeout = unpack_optional_u64(timeout_secs, "timeout_secs")?;
-
-        let task_ref = TaskRef::Python(PythonOperator {
-            script: script.to_owned(),
-            inputs: inputs_vec,
-            outputs: outputs_vec,
-        });
-        let retry = RetryPolicy {
-            max_attempts: max_attempts.max(1) as u32,
-            delay_secs: delay_secs.max(0) as u64,
-        };
-
-        register_operator(collector, task_id, task_ref, retry, timeout, depends_on)
-    }
-
-    /// Register a Bash command task. Returns the task_id string so it can be
-    /// passed as a `depends_on` argument to downstream tasks.
-    fn bash_operator<'v>(
-        task_id: &str,
-        #[starlark(require = named, default = NoneType)] cmd: Value<'v>,
-        #[starlark(require = named, default = NoneType)] script: Value<'v>,
-        #[starlark(require = named, default = NoneType)] depends_on: Value<'v>,
-        #[starlark(require = named, default = NoneType)] timeout_secs: Value<'v>,
-        #[starlark(require = named, default = 1i32)] max_attempts: i32,
-        #[starlark(require = named, default = 0i32)] delay_secs: i32,
-        eval: &mut Evaluator<'v, '_, '_>,
-    ) -> anyhow::Result<String> {
-        let collector = eval
-            .extra
-            .and_then(|e| e.downcast_ref::<DagCollector>())
-            .ok_or_else(|| anyhow!("internal: DagCollector not set"))?;
-
-        let timeout = unpack_optional_u64(timeout_secs, "timeout_secs")?;
-
-        let cmd_opt = if cmd.is_none() {
-            None
-        } else {
-            Some(
-                cmd.unpack_str()
-                    .ok_or_else(|| anyhow!("'cmd' must be a string"))?
-                    .to_owned(),
+    /// Assemble a DAG from a config and terminal task nodes. Must be the last
+    /// expression in the file (its return value is read by compile).
+    fn build<'v>(cfg: Value<'v>, terminals: Value<'v>) -> anyhow::Result<BuiltDag> {
+        let config = cfg.downcast_ref::<PipelineConfig>().ok_or_else(|| {
+            anyhow!(
+                "build() first argument must be a config() value, got {}",
+                cfg.get_type()
             )
-        };
-        let script_opt = if script.is_none() {
-            None
-        } else {
-            Some(
-                script
-                    .unpack_str()
-                    .ok_or_else(|| anyhow!("'script' must be a string"))?
-                    .to_owned(),
-            )
-        };
+        })?;
 
-        match (&cmd_opt, &script_opt) {
-            (None, None) => {
-                return Err(anyhow!(
-                    "bash_operator requires exactly one of 'cmd' or 'script'"
-                ));
-            }
-            (Some(_), Some(_)) => {
-                return Err(anyhow!(
-                    "bash_operator accepts at most one of 'cmd' or 'script'"
-                ));
-            }
-            _ => {}
-        }
+        let terminal_list = unpack_task_node_list(terminals)?;
+        let (nodes, edges) = collect_graph(terminal_list)?;
 
-        let task_ref = TaskRef::Bash(BashOperator {
-            cmd: cmd_opt,
-            script: script_opt,
-        });
-        let retry = RetryPolicy {
-            max_attempts: max_attempts.max(1) as u32,
-            delay_secs: delay_secs.max(0) as u64,
-        };
+        let trigger = config
+            .schedule
+            .clone()
+            .map_or(Trigger::Manual, |s| Trigger::Cron { schedule: s });
 
-        register_operator(collector, task_id, task_ref, retry, timeout, depends_on)
+        Ok(BuiltDag {
+            dag_def: DagDef {
+                version: 1,
+                dag_id: config.dag_id.clone(),
+                pipeline_id: config.pipeline_id.clone(),
+                version_hash: String::new(),
+                trigger,
+                team: config.team.clone(),
+                user: config.user.clone(),
+                nodes,
+                edges,
+                metadata: HashMap::new(),
+                params: config.params.clone(),
+            },
+        })
     }
 }
 
 // ---------------------------------------------------------------------------
-// compile_source — internal, called directly by tests
+// compile
 // ---------------------------------------------------------------------------
 
-/// Run `ast` against `globals` with `collector` wired into `eval.extra`.
-///
-/// The only way to call `eval_module` in this codebase is through this
-/// function, so `eval.extra` is always set — the "not set" branch in the DSL
-/// functions cannot be reached.
-fn eval_with_collector(
-    ast: AstModule,
-    globals: &Globals,
-    collector: &DagCollector,
-) -> anyhow::Result<()> {
-    let module = Module::new();
-    let mut eval = Evaluator::new(&module);
-    eval.extra = Some(collector);
-    eval.eval_module(ast, globals).map_err(|e| anyhow!("{e}"))?;
-    Ok(())
-}
-
-pub(crate) fn compile_source(
+pub fn compile(
     filename: &str,
     source: &str,
     base_dir: Option<&Path>,
 ) -> Result<DagDef, CompileError> {
     let ast = AstModule::parse(filename, source.to_owned(), &Dialect::Standard)
         .map_err(|e| anyhow!("{e}"))?;
-    let globals = GlobalsBuilder::new().with(dag_globals).build();
-    let collector = DagCollector::default();
 
-    eval_with_collector(ast, &globals, &collector)?;
-
-    let cfg = collector
-        .dag_config
-        .borrow_mut()
-        .take()
-        .ok_or_else(|| anyhow!("dag() was never called"))?;
-
-    let trigger = cfg
-        .schedule
-        .map_or(Trigger::Manual, |s| Trigger::Cron { schedule: s });
-
-    let nodes: Vec<Node> = collector
-        .operators
-        .into_inner()
-        .into_iter()
-        .map(|op| Node {
-            id: op.task_id,
-            task_ref: op.task_ref,
-            retry: op.retry,
-            timeout_secs: op.timeout_secs,
-        })
-        .collect();
-
-    let edges: Vec<Edge> = collector
-        .edges
-        .into_inner()
-        .into_iter()
-        .map(|(from, to)| Edge { from, to })
-        .collect();
-
-    let mut dag = DagDef {
-        version: 1,
-        dag_id: cfg.dag_id,
-        pipeline_id: cfg.pipeline_id,
-        version_hash: String::new(),
-        trigger,
-        team: cfg.team,
-        user: cfg.user,
-        nodes,
-        edges,
-        metadata: HashMap::new(),
-        params: cfg.params,
+    let globals = {
+        let mut builder = GlobalsBuilder::new().with(dag_compiler_globals);
+        for reg in crate::operators::all_operator_globals() {
+            builder = builder.with(reg);
+        }
+        builder.build()
     };
 
-    // Resolve pass: canonicalize script paths to absolute before validation.
+    let module = Module::new();
+    let return_val = {
+        let mut eval = Evaluator::new(&module);
+        eval.eval_module(ast, &globals)
+            .map_err(|e| anyhow!("{e}"))?
+    };
+
+    let mut dag = {
+        let built = return_val.downcast_ref::<BuiltDag>().ok_or_else(|| {
+            if return_val.is_none() {
+                anyhow!("build() was never called — the last expression must be build(cfg, ...)")
+            } else {
+                anyhow!(
+                    "expected build() as the last expression, got a {} value",
+                    return_val.get_type()
+                )
+            }
+        })?;
+        built.dag_def.clone()
+    }; // borrow of return_val ends here
+
+    // Resolve pass: canonicalize script paths before validation.
     if let Some(dir) = base_dir {
-        let mut resolve_errors: Vec<crate::validation::ValidationError> = Vec::new();
+        let mut resolve_errors: Vec<ValidationError> = Vec::new();
         for node in &mut dag.nodes {
             if let Some(reason) = node.task_ref.resolve(dir) {
-                resolve_errors.push(crate::validation::ValidationError::InvalidTaskRef {
+                resolve_errors.push(ValidationError::InvalidTaskRef {
                     node_id: node.id.clone(),
                     reason,
                 });
@@ -497,18 +370,6 @@ pub(crate) fn compile_source(
 }
 
 // ---------------------------------------------------------------------------
-// Public entry point
-// ---------------------------------------------------------------------------
-
-/// Compile a `.star` pipeline file into a `DagDef`.
-pub fn compile(path: &Path) -> Result<DagDef, CompileError> {
-    let src = std::fs::read_to_string(path)
-        .map_err(|e| anyhow!("could not read '{}': {e}", path.display()))?;
-    let base_dir = path.parent();
-    compile_source(&path.to_string_lossy(), &src, base_dir)
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -519,10 +380,11 @@ mod tests {
     #[test]
     fn compile_minimal_bash_dag() {
         let src = r#"
-dag("my-dag", pipeline_id="my-pipeline")
-bash_operator("step1", cmd="echo hello")
+cfg = config(name="my-dag", pipeline_id="my-pipeline")
+n = bash_operator("step1", cmd="echo hello")
+build(cfg, n)
 "#;
-        let dag = compile_source("test.star", src, None).unwrap();
+        let dag = compile("test.star", src, None).unwrap();
         assert_eq!(dag.dag_id, "my-dag");
         assert_eq!(dag.nodes.len(), 1);
         assert_eq!(dag.nodes[0].id, "step1");
@@ -531,20 +393,22 @@ bash_operator("step1", cmd="echo hello")
     #[test]
     fn compile_trigger_defaults_to_manual() {
         let src = r#"
-dag("d")
-bash_operator("n", cmd="echo hi")
+cfg = config(name="d")
+n = bash_operator("n", cmd="echo hi")
+build(cfg, n)
 "#;
-        let dag = compile_source("test.star", src, None).unwrap();
+        let dag = compile("test.star", src, None).unwrap();
         assert_eq!(dag.trigger, Trigger::Manual);
     }
 
     #[test]
     fn compile_cron_trigger_when_schedule_set() {
         let src = r#"
-dag("d", schedule="0 6 * * *")
-bash_operator("n", cmd="echo hi")
+cfg = config(name="d", schedule="0 6 * * *")
+n = bash_operator("n", cmd="echo hi")
+build(cfg, n)
 "#;
-        let dag = compile_source("test.star", src, None).unwrap();
+        let dag = compile("test.star", src, None).unwrap();
         assert_eq!(
             dag.trigger,
             Trigger::Cron {
@@ -556,26 +420,28 @@ bash_operator("n", cmd="echo hi")
     #[test]
     fn compile_diamond_matches_json() {
         let src = r#"
-dag("etl-sample", pipeline_id="sample-pipeline", team="data-eng", user="alice")
+cfg = config(name="etl-sample", pipeline_id="sample-pipeline", team="data-eng", user="alice")
 extract = bash_operator("extract", cmd="echo extracting")
 transform_a = bash_operator("transform-a", cmd="echo a", depends_on=extract)
 transform_b = bash_operator("transform-b", cmd="echo b", depends_on=extract)
-bash_operator("load", cmd="echo loading", depends_on=[transform_a, transform_b])
+loader = bash_operator("load", cmd="echo loading", depends_on=[transform_a, transform_b])
+build(cfg, loader)
 "#;
-        let dag = compile_source("test.star", src, None).unwrap();
+        let dag = compile("test.star", src, None).unwrap();
         assert_eq!(dag.dag_id, "etl-sample");
         assert_eq!(dag.nodes.len(), 4);
         assert_eq!(dag.edges.len(), 4);
     }
 
     #[test]
-    fn compile_depends_on_string_creates_edge() {
+    fn compile_depends_on_node_creates_edge() {
         let src = r#"
-dag("d")
-bash_operator("a", cmd="echo a")
-bash_operator("b", cmd="echo b", depends_on="a")
+cfg = config(name="d")
+a = bash_operator("a", cmd="echo a")
+b = bash_operator("b", cmd="echo b", depends_on=a)
+build(cfg, b)
 "#;
-        let dag = compile_source("test.star", src, None).unwrap();
+        let dag = compile("test.star", src, None).unwrap();
         assert_eq!(dag.edges.len(), 1);
         assert_eq!(dag.edges[0].from, "a");
         assert_eq!(dag.edges[0].to, "b");
@@ -584,12 +450,13 @@ bash_operator("b", cmd="echo b", depends_on="a")
     #[test]
     fn compile_depends_on_list_creates_edges() {
         let src = r#"
-dag("d")
-bash_operator("a", cmd="echo a")
-bash_operator("b", cmd="echo b")
-bash_operator("c", cmd="echo c", depends_on=["a", "b"])
+cfg = config(name="d")
+a = bash_operator("a", cmd="echo a")
+b = bash_operator("b", cmd="echo b")
+c = bash_operator("c", cmd="echo c", depends_on=[a, b])
+build(cfg, c)
 "#;
-        let dag = compile_source("test.star", src, None).unwrap();
+        let dag = compile("test.star", src, None).unwrap();
         assert_eq!(dag.edges.len(), 2);
     }
 
@@ -599,49 +466,74 @@ bash_operator("c", cmd="echo c", depends_on=["a", "b"])
         let file = tempfile::Builder::new().suffix(".py").tempfile().unwrap();
         std::fs::write(file.path(), "pass\n").unwrap();
         let script = file.path().to_string_lossy().into_owned();
-        let src = format!("dag(\"d\")\npython_operator(\"step1\", script=\"{script}\")\n");
-        let dag = compile_source("test.star", &src, None).unwrap();
-        match &dag.nodes[0].task_ref {
-            TaskRef::Python(op) => assert_eq!(op.script, script),
-            _ => panic!("expected Python operator"),
-        }
+        let src = format!(
+            "cfg = config(name=\"d\")\ns = python_operator(\"step1\", script=\"{script}\")\nbuild(cfg, s)\n"
+        );
+        let dag = compile("test.star", &src, None).unwrap();
+        let val = serde_json::to_value(&dag.nodes[0].task_ref).unwrap();
+        assert_eq!(val["operator_type"], "python");
+        assert_eq!(val["script"], script);
     }
 
     #[test]
     fn compile_version_hash_is_set() {
         let src = r#"
-dag("d")
-bash_operator("n", cmd="echo hi")
+cfg = config(name="d")
+n = bash_operator("n", cmd="echo hi")
+build(cfg, n)
 "#;
-        let dag = compile_source("test.star", src, None).unwrap();
+        let dag = compile("test.star", src, None).unwrap();
         assert!(!dag.version_hash.is_empty());
         assert_ne!(dag.version_hash, "placeholder");
     }
 
     #[test]
-    fn compile_error_dag_not_called() {
+    fn compile_error_build_not_called() {
+        // No build() call — last expression is None.
         let src = r#"
+cfg = config(name="d")
 bash_operator("n", cmd="echo hi")
 "#;
-        assert!(compile_source("test.star", src, None).is_err());
+        assert!(compile("test.star", src, None).is_err());
     }
 
     #[test]
-    fn compile_error_dag_called_twice() {
+    fn compile_error_depends_on_wrong_type() {
+        // depends_on with a string instead of a task node value.
         let src = r#"
-dag("d1")
-dag("d2")
-bash_operator("n", cmd="echo hi")
+cfg = config(name="d")
+a = bash_operator("a", cmd="echo a")
+b = bash_operator("b", cmd="echo b", depends_on="a")
+build(cfg, b)
 "#;
-        assert!(compile_source("test.star", src, None).is_err());
+        assert!(compile("test.star", src, None).is_err());
     }
 
     #[test]
-    fn compile_error_unknown_depends_on() {
+    fn compile_diamond_shared_dep() {
+        // a is a dependency of both b and c; node a must appear exactly once.
         let src = r#"
-dag("d")
-bash_operator("b", cmd="echo b", depends_on="nonexistent")
+cfg = config(name="d")
+a = bash_operator("a", cmd="echo a")
+b = bash_operator("b", cmd="echo b", depends_on=a)
+c = bash_operator("c", cmd="echo c", depends_on=a)
+d = bash_operator("d", cmd="echo d", depends_on=[b, c])
+build(cfg, d)
 "#;
-        assert!(compile_source("test.star", src, None).is_err());
+        let dag = compile("test.star", src, None).unwrap();
+        assert_eq!(dag.nodes.len(), 4);
+        assert_eq!(dag.edges.len(), 4);
+    }
+
+    #[test]
+    fn compile_error_duplicate_task_id() {
+        let src = r#"
+cfg = config(name="d")
+a1 = bash_operator("dup", cmd="echo a")
+a2 = bash_operator("dup", cmd="echo b")
+b = bash_operator("b", cmd="echo b", depends_on=[a1, a2])
+build(cfg, b)
+"#;
+        assert!(compile("test.star", src, None).is_err());
     }
 }

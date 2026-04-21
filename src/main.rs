@@ -69,7 +69,15 @@ fn cmd_compile(args: &[String]) -> i32 {
         }
     });
 
-    match tinydag::compiler::compile(Path::new(input)) {
+    let path = Path::new(input);
+    let source = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read '{input}': {e}");
+            return 1;
+        }
+    };
+    match tinydag::compiler::compile(input, &source, path.parent()) {
         Ok(dag) => {
             let json = serde_json::to_string_pretty(&dag).expect("serialization cannot fail");
             if let Err(e) = std::fs::write(&output_path, json) {
@@ -100,7 +108,15 @@ async fn cmd_add(args: &[String]) -> i32 {
 
     let run_now = args.iter().any(|a| a == "--run-now");
 
-    let dag = match tinydag::compiler::compile(Path::new(path)) {
+    let star_path = Path::new(path);
+    let source = match std::fs::read_to_string(star_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read '{path}': {e}");
+            return 1;
+        }
+    };
+    let dag = match tinydag::compiler::compile(path, &source, star_path.parent()) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("error: {e}");

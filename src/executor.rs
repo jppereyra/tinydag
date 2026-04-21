@@ -103,8 +103,14 @@ pub enum ExecutorError {
     #[error("node '{node_id}': failed to parse operator stdout as JSON: {reason}")]
     OutputParseFailed { node_id: NodeId, reason: String },
 
-    #[error("node '{node_id}': no binary registered for operator type '{operator}'")]
-    UnregisteredOperator { node_id: NodeId, operator: String },
+    #[error(
+        "node '{node_id}': operator '{operator}' not configured — set TINYDAG_OP_{operator_upper}"
+    )]
+    OperatorBinaryNotFound {
+        node_id: NodeId,
+        operator: String,
+        operator_upper: String,
+    },
 }
 
 /// A backend that can dispatch individual tasks.
@@ -122,55 +128,22 @@ pub trait Executor: Send + Sync + 'static {
 
 /// Runs tasks by spawning operator binaries as child processes on the local machine.
 ///
-/// Each operator type maps to an executable. The default binary name for operator
-/// type `X` is `tinydag-op-X` (looked up on `PATH`), overridable via the
-/// `TINYDAG_OP_<X>` environment variable (e.g. `TINYDAG_OP_PYTHON=/usr/bin/python3`).
+/// The binary for operator type `X` is resolved from the `TINYDAG_OP_<X>`
+/// environment variable (e.g. `TINYDAG_OP_BASH=/usr/local/bin/tinydag-op-bash`).
 pub struct LocalExecutor {
-    /// Maps operator type name to the path to the operator binary.
-    registry: HashMap<String, String>,
     /// How long to wait between heartbeats before declaring a task stuck.
     pub heartbeat_timeout_secs: u64,
     control_server: std::sync::Arc<crate::control_server::ControlServer>,
 }
 
 impl LocalExecutor {
-    /// Build a `LocalExecutor` from the environment.
-    ///
-    /// For each known operator type, checks `TINYDAG_OP_<TYPE>` first,
-    /// then falls back to `tinydag-op-<type>` as the default binary name.
     pub async fn new() -> Self {
-        // FIXME: Replace this with a more robust plugin system.
-        let known = ["python", "bash"];
-        let registry = known
-            .iter()
-            .map(|&op| {
-                let env_key = format!("TINYDAG_OP_{}", op.to_uppercase());
-                let binary = std::env::var(&env_key).unwrap_or_else(|_| format!("tinydag-op-{op}"));
-                (op.to_string(), binary)
-            })
-            .collect();
         let control_server = std::sync::Arc::new(
             crate::control_server::ControlServer::start()
                 .await
                 .expect("failed to start gRPC control server"),
         );
         LocalExecutor {
-            registry,
-            heartbeat_timeout_secs: 90,
-            control_server,
-        }
-    }
-
-    /// Build a `LocalExecutor` with an explicit registry.
-    /// Primarily useful in tests.
-    pub async fn with_registry(registry: HashMap<String, String>) -> Self {
-        let control_server = std::sync::Arc::new(
-            crate::control_server::ControlServer::start()
-                .await
-                .expect("failed to start gRPC control server"),
-        );
-        LocalExecutor {
-            registry,
             heartbeat_timeout_secs: 90,
             control_server,
         }
@@ -192,14 +165,13 @@ impl Executor for LocalExecutor {
         let start = Instant::now();
         let operator = payload.task_ref.type_name();
 
-        let binary = self
-            .registry
-            .get(operator)
-            .ok_or_else(|| ExecutorError::UnregisteredOperator {
+        let env_key = format!("TINYDAG_OP_{}", operator.to_ascii_uppercase());
+        let binary =
+            std::env::var(&env_key).map_err(|_| ExecutorError::OperatorBinaryNotFound {
                 node_id: payload.node_id.clone(),
                 operator: operator.to_string(),
-            })?
-            .to_string();
+                operator_upper: operator.to_ascii_uppercase(),
+            })?;
 
         let result = self.spawn_operator(&binary, &payload).await;
 
@@ -368,8 +340,6 @@ impl LocalExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dag::TaskRef;
-    use crate::operators::BashOperator;
 
     /// Returns a LocalExecutor backed by the real tinydag-op-bash binary.
     ///
@@ -387,32 +357,34 @@ mod tests {
             .parent()
             .unwrap() // …/debug
             .join("tinydag-op-bash");
-        let mut registry = HashMap::new();
-        registry.insert("bash".to_string(), binary.to_string_lossy().into_owned());
-        LocalExecutor::with_registry(registry).await
+        // SAFETY: tests run in separate processes; no other threads access env at this point.
+        unsafe { std::env::set_var("TINYDAG_OP_BASH", &binary) };
+        LocalExecutor::new().await
+    }
+
+    fn test_run_context() -> RunContext {
+        RunContext {
+            run_id: "run-1".to_string(),
+            dag_id: "test-dag".to_string(),
+            pipeline_id: "test-pipeline".to_string(),
+            dag_version: "abc123".to_string(),
+            team: "test-team".to_string(),
+            user: "test-user".to_string(),
+            trigger_type: "manual".to_string(),
+        }
     }
 
     /// Build a bash dispatch payload whose cmd drives the operator's behaviour.
     fn bash_payload(id: &str, cmd: &str, timeout: Option<u64>) -> DispatchPayload {
-        DispatchPayload {
-            ctx: RunContext {
-                run_id: "run-1".to_string(),
-                dag_id: "test-dag".to_string(),
-                pipeline_id: "test-pipeline".to_string(),
-                dag_version: "abc123".to_string(),
-                team: "test-team".to_string(),
-                user: "test-user".to_string(),
-                trigger_type: "manual".to_string(),
-            },
-            node_id: id.to_string(),
-            task_ref: TaskRef::Bash(BashOperator {
-                cmd: Some(cmd.to_string()),
-                script: None,
-            }),
-            inputs: HashMap::new(),
-            dag_params: HashMap::new(),
-            timeout_secs: timeout,
-        }
+        let src = format!(
+            "cfg = config(name=\"test\")\nn = bash_operator({id:?}, cmd={cmd:?})\nbuild(cfg, n)\n"
+        );
+        let dag = crate::compiler::compile("test.star", &src, None).unwrap();
+        let node = dag.nodes().iter().find(|n| n.id == id).unwrap().clone();
+        let mut payload =
+            DispatchPayload::from_node(&node, test_run_context(), HashMap::new(), HashMap::new());
+        payload.timeout_secs = timeout;
+        payload
     }
 
     #[tokio::test]

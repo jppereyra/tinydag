@@ -49,43 +49,53 @@ export PATH="$PWD/target/release:$PATH"
 
 ## Writing a pipeline
 
-Pipelines are defined in `.star` files using a small DSL built on Starlark.
+Pipelines are defined in `.star` files using a small DSL built on Starlark. A pipeline file has three parts: a config header, operator definitions, and a `build()` call that assembles the graph.
 
 ```python
 # pipeline.star
-dag("my-pipeline",
+cfg = config(
+    name        = "my-pipeline",
     pipeline_id = "my-team-pipelines",
     team        = "data-eng",
     user        = "alice",
 )
 
 extract = bash_operator("extract",
-    cmd = "echo '{\"outputs\":{\"rows\":1000}}' > tinydag_outputs.json",
+    cmd = "printf '{\"outputs\":{\"rows\":1000}}' > tinydag_outputs.json",
 )
 
 transform = bash_operator("transform",
-    cmd = "echo transforming >&2",
+    cmd        = "echo transforming >&2",
     depends_on = extract,
 )
 
-bash_operator("load",
-    cmd = "echo loading >&2",
+load = bash_operator("load",
+    cmd        = "echo loading >&2",
     depends_on = transform,
 )
+
+build(cfg, load)
+```
+
+Operator functions return values that you should pass to `depends_on` directly. `build()` takes the terminal node (or a list of terminal nodes) and walks the dependency graph from there. You can use the full Starlark language to build pipelines programmatically:
+
+```python
+cfg = config(name="regional-pipeline", team="data-eng")
+
+def regional(region):
+    extract = bash_operator(f"extract-{region}", cmd = f"extract.sh {region}")
+    load    = python_operator(f"load-{region}",   script = "tasks/load.py",
+                              depends_on = extract)
+    return load
+
+loads = [regional(r) for r in ["us", "eu", "apac"]]
+done  = bash_operator("done", cmd = "echo all regions loaded", depends_on = loads)
+
+build(cfg, done)
 ```
 
 Tasks write outputs to `tinydag_outputs.json` in their work directory: `{"outputs": {"key": value}}`. Stdout is a free logging channel. Upstream outputs are available in `tinydag_inputs.json` before your script runs. DAG params are in `tinydag_params.json`.
 
-For Python scripts, use `python_operator`:
-
-```python
-transform = python_operator("transform",
-    script     = "tasks/transform.py",
-    inputs     = ["raw"],
-    outputs    = ["processed"],
-    depends_on = extract,
-)
-```
 
 ---
 
@@ -94,7 +104,7 @@ transform = python_operator("transform",
 ```
 tinydag compile <pipeline.star> [--output <path>]
 ```
-Compiles a Starlark pipeline, runs validation, and writes the DAG artifact to disk as JSON. Default output path: `<pipeline>.dag.json`.
+Compiles a Starlark pipeline, runs validation, and writes the DAG artifact to disk as JSON. Default output path: `<pipeline>.dag.json`. This is useful for debugging purposes.
 
 ```
 tinydag add <pipeline.star> [--run-now]
@@ -110,8 +120,7 @@ With `--run-now`, an immediate run is triggered and the result is printed on com
 pipeline.star  →  compiler  →  DagDef  →  scheduler  →  runner  →  executor  →  operator binary
 ```
 
-The compiler is the only path to a `DagDef`. A `DagDef` in the scheduler registry is guaranteed to have been validated. On trigger, the runner walks the graph dispatching
-tasks as their dependencies complete and running independent branches in parallel.
+The compiler is the only path to a `DagDef`. On trigger, the runner walks the graph dispatching tasks as their dependencies complete and running independent branches in parallel.
 
 Operator binaries are separate processes. The executor spawns them, writes the dispatch payload to stdin, and receives lifecycle events (started, heartbeat, succeeded, failed) over gRPC. Any binary that implements the protocol can be a valid operator.
 

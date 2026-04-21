@@ -3,8 +3,12 @@
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use starlark::environment::GlobalsBuilder;
+use starlark::starlark_module;
+use starlark::values::Value;
+use starlark::values::none::NoneType;
 
-use super::Operator;
+use super::{Operator, TaskNode, unpack_depends_on, unpack_optional_u64, unpack_string_list};
 
 /// Config for a Python script task.
 ///
@@ -59,6 +63,45 @@ impl Operator for PythonOperator {
 
     fn type_name(&self) -> &'static str {
         "python"
+    }
+
+    fn content_for_hash(&self) -> Vec<u8> {
+        // Safe to read: content_for_hash is called after validate(), which already
+        // confirmed the script exists and is readable.
+        std::fs::read(&self.script).unwrap_or_default()
+    }
+}
+
+/// Registers `python_operator()` as a Starlark global.
+#[allow(clippy::too_many_arguments)]
+#[starlark_module]
+pub fn register_globals(builder: &mut GlobalsBuilder) {
+    fn python_operator<'v>(
+        task_id: &str,
+        #[starlark(require = named)] script: &str,
+        #[starlark(require = named, default = NoneType)] inputs: Value<'v>,
+        #[starlark(require = named, default = NoneType)] outputs: Value<'v>,
+        #[starlark(require = named, default = NoneType)] depends_on: Value<'v>,
+        #[starlark(require = named, default = NoneType)] timeout_secs: Value<'v>,
+        #[starlark(require = named, default = 1i32)] max_attempts: i32,
+        #[starlark(require = named, default = 0i32)] delay_secs: i32,
+    ) -> anyhow::Result<TaskNode<'v>> {
+        let deps = unpack_depends_on(depends_on)?;
+        let inputs_vec = unpack_string_list(inputs, "inputs")?;
+        let outputs_vec = unpack_string_list(outputs, "outputs")?;
+        let timeout = unpack_optional_u64(timeout_secs, "timeout_secs")?;
+        Ok(TaskNode {
+            task_id: task_id.to_owned(),
+            task_ref: super::TaskRef::Python(PythonOperator {
+                script: script.to_owned(),
+                inputs: inputs_vec,
+                outputs: outputs_vec,
+            }),
+            depends_on: deps,
+            max_attempts: max_attempts.max(1) as u32,
+            delay_secs: delay_secs.max(0) as u64,
+            timeout_secs: timeout,
+        })
     }
 }
 
@@ -153,7 +196,6 @@ mod tests {
     }
 
     async fn python_executor() -> crate::executor::LocalExecutor {
-        use std::collections::HashMap;
         let test_bin = std::env::current_exe().expect("can't locate test binary");
         let binary = test_bin
             .parent()
@@ -161,9 +203,9 @@ mod tests {
             .parent()
             .unwrap()
             .join("tinydag-op-python");
-        let mut registry = HashMap::new();
-        registry.insert("python".to_string(), binary.to_string_lossy().into_owned());
-        crate::executor::LocalExecutor::with_registry(registry).await
+        // SAFETY: tests run in separate processes; no other threads access env at this point.
+        unsafe { std::env::set_var("TINYDAG_OP_PYTHON", &binary) };
+        crate::executor::LocalExecutor::new().await
     }
 
     fn python_payload(node_id: &str, script: &str) -> crate::executor::DispatchPayload {
@@ -176,7 +218,6 @@ mod tests {
         inputs: std::collections::HashMap<String, serde_json::Value>,
         dag_params: std::collections::HashMap<String, serde_json::Value>,
     ) -> crate::executor::DispatchPayload {
-        use crate::dag::TaskRef;
         use crate::executor::RunContext;
         crate::executor::DispatchPayload {
             ctx: RunContext {
@@ -189,7 +230,7 @@ mod tests {
                 trigger_type: "manual".to_string(),
             },
             node_id: node_id.to_string(),
-            task_ref: TaskRef::Python(PythonOperator {
+            task_ref: crate::operators::TaskRef::Python(PythonOperator {
                 script: script.to_string(),
                 inputs: vec![],
                 outputs: vec![],

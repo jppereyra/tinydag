@@ -310,21 +310,22 @@ mod tests {
             .parent()
             .unwrap() // …/debug
             .join("tinydag-op-bash");
-        let mut registry = HashMap::new();
-        registry.insert("bash".to_string(), binary.to_string_lossy().into_owned());
-        Arc::new(LocalExecutor::with_registry(registry).await)
+        // SAFETY: tests run in separate processes; no other threads access env at this point.
+        unsafe { std::env::set_var("TINYDAG_OP_BASH", &binary) };
+        Arc::new(LocalExecutor::new().await)
     }
 
     fn compile_dag(src: &str) -> DagDef {
-        crate::compiler::compile_source("test.star", src, None).unwrap()
+        crate::compiler::compile("test.star", src, None).unwrap()
     }
 
     #[tokio::test]
     async fn single_successful_task() {
         let dag = compile_dag(
             r#"
-dag("test")
-bash_operator("a", cmd="true")
+cfg = config(name="test")
+a = bash_operator("a", cmd="true")
+build(cfg, a)
 "#,
         );
         let outcome = run(RunConfig {
@@ -340,8 +341,9 @@ bash_operator("a", cmd="true")
     async fn failing_task_returns_run_error() {
         let dag = compile_dag(
             r#"
-dag("test")
-bash_operator("a", cmd="exit 1")
+cfg = config(name="test")
+a = bash_operator("a", cmd="exit 1")
+build(cfg, a)
 "#,
         );
         let err = run(RunConfig {
@@ -357,10 +359,11 @@ bash_operator("a", cmd="exit 1")
     async fn linear_chain_runs_in_order() {
         let dag = compile_dag(
             r#"
-dag("chain")
+cfg = config(name="chain")
 a = bash_operator("a", cmd="true")
 b = bash_operator("b", cmd="true", depends_on=a)
-bash_operator("c", cmd="true", depends_on=b)
+c = bash_operator("c", cmd="true", depends_on=b)
+build(cfg, c)
 "#,
         );
         let outcome = run(RunConfig {
@@ -385,11 +388,12 @@ bash_operator("c", cmd="true", depends_on=b)
         // a -> b, a -> c, b -> d, c -> d
         let dag = compile_dag(
             r#"
-dag("diamond")
+cfg = config(name="diamond")
 a = bash_operator("a", cmd="true")
 b = bash_operator("b", cmd="true", depends_on=a)
 c = bash_operator("c", cmd="true", depends_on=a)
-bash_operator("d", cmd="true", depends_on=[b, c])
+d = bash_operator("d", cmd="true", depends_on=[b, c])
+build(cfg, d)
 "#,
         );
         let outcome = run(RunConfig {
@@ -416,10 +420,11 @@ bash_operator("d", cmd="true", depends_on=[b, c])
         // a and b both produce name "x"; c depends on both — should fail.
         let dag = compile_dag(
             r#"
-dag("dup")
+cfg = config(name="dup")
 a = bash_operator("a", cmd="printf '{\"outputs\":{\"x\":1}}' > tinydag_outputs.json")
 b = bash_operator("b", cmd="printf '{\"outputs\":{\"x\":2}}' > tinydag_outputs.json")
-bash_operator("c", cmd="true", depends_on=[a, b])
+c = bash_operator("c", cmd="true", depends_on=[a, b])
+build(cfg, c)
 "#,
         );
         let err = run(RunConfig {
@@ -440,10 +445,11 @@ bash_operator("c", cmd="true", depends_on=[a, b])
         // a produces "x", b produces "y"; c depends on both — no collision.
         let dag = compile_dag(
             r#"
-dag("merge")
+cfg = config(name="merge")
 a = bash_operator("a", cmd="printf '{\"outputs\":{\"x\":1}}' > tinydag_outputs.json")
 b = bash_operator("b", cmd="printf '{\"outputs\":{\"y\":2}}' > tinydag_outputs.json")
-bash_operator("c", cmd="true", depends_on=[a, b])
+c = bash_operator("c", cmd="true", depends_on=[a, b])
+build(cfg, c)
 "#,
         );
         let outcome = run(RunConfig {

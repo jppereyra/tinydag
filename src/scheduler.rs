@@ -61,7 +61,6 @@ mod tests {
     use super::*;
     use crate::dag::DagDef;
     use crate::executor::LocalExecutor;
-    use std::collections::HashMap;
 
     async fn bash_executor() -> Arc<dyn Executor> {
         let test_bin = std::env::current_exe().expect("can't locate test binary");
@@ -71,13 +70,13 @@ mod tests {
             .parent()
             .unwrap() // …/debug
             .join("tinydag-op-bash");
-        let mut registry = HashMap::new();
-        registry.insert("bash".to_string(), binary.to_string_lossy().into_owned());
-        Arc::new(LocalExecutor::with_registry(registry).await)
+        // SAFETY: tests run in separate processes; no other threads access env at this point.
+        unsafe { std::env::set_var("TINYDAG_OP_BASH", &binary) };
+        Arc::new(LocalExecutor::new().await)
     }
 
     fn compile_dag(src: &str) -> DagDef {
-        crate::compiler::compile_source("test.star", src, None).unwrap()
+        crate::compiler::compile("test.star", src, None).unwrap()
     }
 
     #[tokio::test]
@@ -86,8 +85,9 @@ mod tests {
         let scheduler = Scheduler::new(executor);
         let dag = compile_dag(
             r#"
-dag("test")
-bash_operator("a", cmd="printf '{\"outputs\":{}}'  ")
+cfg = config(name="test")
+a = bash_operator("a", cmd="printf '{\"outputs\":{}}'  ")
+build(cfg, a)
 "#,
         );
         scheduler.register(dag);
@@ -110,8 +110,9 @@ bash_operator("a", cmd="printf '{\"outputs\":{}}'  ")
         let scheduler = Scheduler::new(executor);
         let dag = compile_dag(
             r#"
-dag("test")
-bash_operator("a", cmd="exit 1")
+cfg = config(name="test")
+a = bash_operator("a", cmd="exit 1")
+build(cfg, a)
 "#,
         );
         scheduler.register(dag);

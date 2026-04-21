@@ -5,52 +5,17 @@
 //! execution logic.
 
 use std::collections::HashMap;
-use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::operators::{BashOperator, Operator, PythonOperator};
+use crate::operators::Operator as _;
+
+// Re-export so callers can use `crate::dag::TaskRef` as before.
+pub use crate::operators::TaskRef;
 
 /// A unique identifier for a node within a DAG.
 pub type NodeId = String;
-
-/// How the task is invoked. A tagged union serialized flat alongside
-/// `operator_type`: `{"operator_type": "<type>", <operator fields...>}`.
-// The enum is the right representation for a closed, schema-versioned operator set.
-//
-// If tinydag ever supports dynamically-loaded community operators, migrate to
-// Box<dyn Operator> + typetag::serde. That requires adding dyn_clone for Clone,
-// losing PartialEq, and accepting a heap allocation per node
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "operator_type", rename_all = "snake_case")]
-pub enum TaskRef {
-    Python(PythonOperator),
-    Bash(BashOperator),
-}
-
-impl Operator for TaskRef {
-    fn validate(&self) -> Option<String> {
-        match self {
-            TaskRef::Python(c) => c.validate(),
-            TaskRef::Bash(c) => c.validate(),
-        }
-    }
-
-    fn resolve(&mut self, base_dir: &Path) -> Option<String> {
-        match self {
-            TaskRef::Python(c) => c.resolve(base_dir),
-            TaskRef::Bash(c) => c.resolve(base_dir),
-        }
-    }
-
-    fn type_name(&self) -> &'static str {
-        match self {
-            TaskRef::Python(c) => c.type_name(),
-            TaskRef::Bash(c) => c.type_name(),
-        }
-    }
-}
 
 /// Retry policy for a node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -104,8 +69,7 @@ pub struct Edge {
 
 /// The complete DAG definition.
 ///
-/// Constructed exclusively via [`crate::compiler::compile`] (public) or
-/// [`crate::compiler::compile_source`] (pub(crate)). Fields are pub(crate) so
+/// Constructed exclusively via [`crate::compiler::compile`]. Fields are pub(crate) so
 /// internal crate code can read them directly; external consumers use the
 /// public getters below.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -189,11 +153,14 @@ impl DagDef {
         &self.metadata
     }
 
-    /// Compute a deterministic SHA-256 hash over the DAG's structural content:
-    /// dag_id, pipeline_id, sorted node IDs, and sorted edges.
+    /// Compute a deterministic SHA-256 hash over the DAG's structural content.
     ///
-    /// Call this after fully assembling the DAG and store the result in
-    /// `version_hash` before persisting or dispatching.
+    /// Covers: dag_id, pipeline_id, sorted node IDs, operator config (type +
+    /// field values), operator runtime content (inline cmd text or script file
+    /// bytes), sorted edges, and sorted params.
+    ///
+    /// Call this after resolve() so script paths are absolute and file contents
+    /// are stable.
     pub fn compute_version_hash(&self) -> String {
         let mut hasher = Sha256::new();
 
@@ -206,7 +173,18 @@ impl DagDef {
         let mut node_ids: Vec<&str> = self.nodes.iter().map(|n| n.id.as_str()).collect();
         node_ids.sort_unstable();
         for id in &node_ids {
+            let node = self.nodes.iter().find(|n| n.id == *id).unwrap();
             hasher.update(id.as_bytes());
+            hasher.update(b"\x00");
+            // Operator type + field values (script path, cmd, inputs, outputs).
+            hasher.update(
+                serde_json::to_string(&node.task_ref)
+                    .unwrap_or_default()
+                    .as_bytes(),
+            );
+            hasher.update(b"\x01");
+            // Operator runtime content: cmd text or script file bytes.
+            hasher.update(node.task_ref.content_for_hash());
             hasher.update(b"\x00");
         }
 
@@ -242,16 +220,11 @@ impl DagDef {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operators::{BashOperator, PythonOperator};
 
-    fn python_node(id: &str) -> Node {
+    fn stub_node(id: &str) -> Node {
         Node {
             id: id.to_string(),
-            task_ref: TaskRef::Python(PythonOperator {
-                script: format!("tasks/{id}.py"),
-                inputs: vec![],
-                outputs: vec![],
-            }),
+            task_ref: crate::operators::TaskRef::stub(),
             retry: RetryPolicy::default(),
             timeout_secs: None,
         }
@@ -261,7 +234,7 @@ mod tests {
     fn version_hash_is_deterministic() {
         let mut dag = DagDef::new("train");
         dag.pipeline_id = "ml-pipeline".to_string();
-        dag.nodes.extend([python_node("a"), python_node("b")]);
+        dag.nodes.extend([stub_node("a"), stub_node("b")]);
         dag.edges.push(Edge {
             from: "a".to_string(),
             to: "b".to_string(),
@@ -277,10 +250,10 @@ mod tests {
     fn version_hash_changes_when_node_added() {
         let mut dag = DagDef::new("train");
         dag.pipeline_id = "ml-pipeline".to_string();
-        dag.nodes.push(python_node("a"));
+        dag.nodes.push(stub_node("a"));
 
         let h1 = dag.compute_version_hash();
-        dag.nodes.push(python_node("b"));
+        dag.nodes.push(stub_node("b"));
         let h2 = dag.compute_version_hash();
 
         assert_ne!(h1, h2);
@@ -292,7 +265,7 @@ mod tests {
         dag1.pipeline_id = "ml-pipeline".to_string();
         dag1.team = "team-a".to_string();
         dag1.user = "alice".to_string();
-        dag1.nodes.push(python_node("a"));
+        dag1.nodes.push(stub_node("a"));
 
         let mut dag2 = dag1.clone();
         dag2.team = "team-b".to_string();
@@ -304,10 +277,10 @@ mod tests {
     #[test]
     fn version_hash_is_order_independent_for_nodes() {
         let mut dag1 = DagDef::new("train");
-        dag1.nodes.extend([python_node("a"), python_node("b")]);
+        dag1.nodes.extend([stub_node("a"), stub_node("b")]);
 
         let mut dag2 = DagDef::new("train");
-        dag2.nodes.extend([python_node("b"), python_node("a")]);
+        dag2.nodes.extend([stub_node("b"), stub_node("a")]);
 
         assert_eq!(dag1.compute_version_hash(), dag2.compute_version_hash());
     }
@@ -336,12 +309,12 @@ mod tests {
     #[test]
     fn task_ref_serialization_roundtrip() {
         let cases: Vec<TaskRef> = vec![
-            TaskRef::Python(PythonOperator {
+            TaskRef::Python(crate::operators::python::PythonOperator {
                 script: "mymodule/extract.py".to_string(),
                 inputs: vec![],
                 outputs: vec!["raw".to_string()],
             }),
-            TaskRef::Bash(BashOperator {
+            TaskRef::Bash(crate::operators::bash::BashOperator {
                 cmd: Some("echo hello".to_string()),
                 script: None,
             }),
@@ -373,7 +346,7 @@ mod tests {
     #[test]
     fn dag_params_affect_version_hash() {
         let mut dag1 = DagDef::new("d");
-        dag1.nodes.push(python_node("a"));
+        dag1.nodes.push(stub_node("a"));
 
         let mut dag2 = dag1.clone();
         dag2.params
@@ -391,7 +364,7 @@ mod tests {
         };
         dag.team = "data-eng".to_string();
         dag.user = "alice".to_string();
-        dag.nodes.extend([python_node("a"), python_node("b")]);
+        dag.nodes.extend([stub_node("a"), stub_node("b")]);
         dag.edges.push(Edge {
             from: "a".to_string(),
             to: "b".to_string(),

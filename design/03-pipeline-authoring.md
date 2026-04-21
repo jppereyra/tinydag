@@ -1,72 +1,152 @@
 ### Task Definition Language
 
-**Python is the user-facing DSL.**
+**Starlark is the user-facing DSL.**
 
 The architecture is a compilation pipeline:
 
 ```
-Python DSL -> Parser -> DagDef -> Orchestrator
-                                  ^
-External systems  ----------------|
+Starlark DSL -> Compiler -> DagDef -> Orchestrator
+                                      ^
+External systems  --------------------|
 ```
 
-The Python layer is a configuration language, not an execution environment.
-Users define pipelines in Python; tinydag parses that into a DAG definition
-and the orchestrator never sees raw Python.
-This means users cannot interact with or affect the orchestrator from their
-pipeline code.
+The Starlark layer is a programming language for expressing pipeline structure,
+not an execution environment. Users define pipelines in Starlark; the compiler
+parses that into a DAG definition and the orchestrator never sees raw Starlark.
 
-**Reference:** Starlark (used by Bazel) is a restricted Python dialect designed
-for exactly this use case. It's deterministic, no side effects, no imports,
-sandboxed. Worth studying as a reference for what restrictions to impose on
-the parser.
+Starlark (used by Bazel and Buck) is a restricted Python dialect that is deterministic,
+has no imports, is sandboxed, and does not allow side effects. These constraints are what make
+compile-time validation possible while allowing the use of loops,
+conditionals, and functions to generate structure
+executing application code at compile time.
 
-External systems can submit a DAG definition directly, bypassing the Python DSL entirely.
+### Pipeline Libraries
+
+Starlark's `load()` statement enables shared pipeline libraries.
+
+- **`.star`** — pipeline entry points; the file passed to `tinydag add` or
+  `tinydag compile`. Must contain a `build()` call.
+- **`.tdg`** — shared library files; imported via `load()`, never executed
+  directly and must not contain a `build()` call.
+
+
+
+```python
+# lib/patterns.tdg
+def regional(name, regions=["us", "eu", "apac"]):
+    loads = []
+    for r in regions:
+        extract = bash_operator(f"{name}-extract-{r}", cmd=f"extract.sh {r}")
+        load    = python_operator(f"{name}-load-{r}", script="tasks/load.py",
+                                  depends_on=extract)
+        loads.append(load)
+    return loads
+```
+
+```python
+# pipeline.star
+load("//lib/patterns.tdg", "regional")
+
+cfg  = config(name="sales-pipeline", team="data-eng")
+done = bash_operator("done", cmd="echo all done", depends_on=regional("sales"))
+build(cfg, done)
+```
+
+Load paths are repo-rooted: `//` refers to the repository root, inferred from
+the location of `tinydag.toml`. This keeps paths unambiguous regardless of
+where in the directory tree the calling `.star` file lives.
+
+Because Starlark freezes library values after evaluation, library files are safe
+to share across many pipeline files with no copying or mutation risk. The
+sandboxing guarantees that a library cannot make network calls, access the
+filesystem, or import arbitrary Python packages, it can only build and return
+task values.
+
+Every pipeline file has three parts:
+
+```python
+# 1. Config header with pipeline metadata
+cfg = config(name="my-pipeline", team="data-eng", schedule="0 6 * * *")
+
+# 2. Operator declarations
+extract   = bash_operator("extract",   cmd = "extract.sh")
+transform = python_operator("transform", script = "tasks/transform.py",
+                             inputs = ["raw"], outputs = ["processed"],
+                             depends_on = extract)
+load      = bash_operator("load",      cmd = "load.sh", depends_on = transform)
+
+# 3. Build call that assembles the graph and closes the pipeline
+build(cfg, load)
+```
+
+`config()` validates required fields and returns a pipeline configuration value.
+Operator functions (`bash_operator`, `python_operator`, etc.) return task values
+that can be passed to `depends_on`. `build()` takes the terminal task (or a list
+of terminal tasks) and walks the dependency graph to assemble the full `DagDef`.
+
+The full Starlark language is available for
+generating pipeline structure:
+
+```python
+cfg = config(name="regional-etl", team="data-eng")
+
+def regional_pipeline(region):
+    extract = bash_operator(f"extract-{region}", cmd = f"extract.sh {region}")
+    load    = python_operator(f"load-{region}",   script = "tasks/load.py",
+                              depends_on = extract)
+    return load
+
+loads = [regional_pipeline(r) for r in ["us", "eu", "apac"]]
+done  = bash_operator("done", cmd = "echo all done", depends_on = loads)
+
+build(cfg, done)
+```
+
+Forward references are impossible because`depends_on` takes task
+values, not string IDs, so you can only depend on a task that has already been
+assigned.
 
 ### Task Module Validation
 
-At compile time, tinydag attempts to import every callable reference declared in
-the DAG definition. A malformed module, broken import, or missing function is caught here.
+At compile time, tinydag validates every operator's configuration. For script
+operators, this includes checking that the referenced file exists and passes
+a syntax check (`bash -n` for shell scripts, `python -m py_compile` for Python).
 
 **Validation modes:**
 
-- **Strict (v1 default):** imports callable in local Python environment.
-  Compilation fails if any callable cannot be imported. Appropriate for the
-  local executor and development environments.
-- **Container:** imports callable inside the execution container image
+- **Strict (v1 default):** validates scripts in the local environment.
+  Compilation fails if any script cannot be found or parsed. Appropriate for
+  the local executor and development environments.
+- **Container:** validates scripts inside the execution container image
   locally. Same strictness as strict mode but validates against the actual
-  execution environment. Requires Docker at compile time. Slower and more
-  expensive but catches environment mismatches.
-- **Manifest-based (v2, maybe):** the execution environment publishes a manifest
-  of available callables; tinydag validates against that instead of importing
-  directly. Decouples validation from the local environment entirely.
+  execution environment. Requires Docker at compile time.
+- **Manifest-based (v2, maybe):** the execution environment publishes a manifest;
+  tinydag validates against that instead of checking locally. Decouples
+  validation from the local environment entirely.
 - **Warn:** skips validation and emits a warning. Escape hatch only.
 
 ### Task Interface
 
 Pipeline structure, task wiring, and metadata are declared in the Starlark
-file. Task logic lives in plain Python modules with no tinydag imports.
+file. Task logic lives in the operator, or any callables defined by the operator.
 
 ```python
 # pipeline.star
-pipeline = DAG("my_pipeline", schedule="0 * * * *")
+cfg = config(name="my-pipeline", schedule="0 * * * *")
 
-with pipeline:
-    raw = PythonOperator(
-        task_id="extract",
-        python_callable="mymodule.extract",
-        inputs=[],
-        outputs=["raw_data"]
-    )
+extract = python_operator("extract",
+    script  = "mymodule.py",
+    outputs = ["raw_data"],
+)
 
-    cleaned = PythonOperator(
-        task_id="clean",
-        python_callable="mymodule.clean",
-        inputs=["raw_data"],
-        outputs=["clean_data"]
-    )
+clean = python_operator("clean",
+    script     = "mymodule.py",
+    inputs     = ["raw_data"],
+    outputs    = ["clean_data"],
+    depends_on = extract,
+)
 
-    raw >> cleaned
+build(cfg, clean)
 ```
 
 ```python
@@ -80,30 +160,10 @@ def clean(raw_data):
     return np.array(raw_data).mean()
 ```
 
-The Starlark file holds only string references to callables. tinydag resolves
-those references at compile time but never executes them. Execution happens
-in the task runtime, which is plain Python with no restrictions. This means
-task code can be tested with plain pytest, run locally without tinydag
-installed, and migrated away from tinydag without touching task modules.
-
-**Open question: dependency declaration syntax**
-
-For small pipelines, declaring dependencies inline with `depends_on` is
-readable. For larger pipelines, a dedicated dependency block separating
-structure from operator definitions scales better:
-
-```python
-dependencies = [
-    extract >> clean,
-    clean >> [enrich, validate],
-    enrich >> aggregate,
-    validate >> aggregate,
-]
-```
-
-The right syntax for tinydag is an open question. It should be readable at
-scale and make the topology of the pipeline visible without having to read
-every operator definition. Feedback welcome.
+Task code in a PythonOperator, for example,  has zero tinydag imports. It can be tested with plain pytest, run
+locally without tinydag installed, and migrated away from tinydag without
+touching task modules. The Starlark file holds the wiring; task modules hold
+the logic.
 
 ### Static vs. Dynamic DAGs
 
@@ -140,19 +200,19 @@ of resolved values that late-bound inputs are keyed into:
 
 ```python
 # pipeline.star
-pipeline = DAG(
-    "my_pipeline",
-    schedule="0 * * * *",
-    resolver="resolvers.resolve"
+cfg = config(
+    name     = "my_pipeline",
+    schedule = "0 * * * *",
+    resolver = "resolvers.resolve",
 )
 
-with pipeline:
-    process = PythonOperator(
-        task_id="process_file",
-        python_callable="mymodule.process",
-        inputs=late("files"),
-        outputs=["result"]
-    )
+process = python_operator("process_file",
+    script  = "mymodule.py",
+    inputs  = late("files"),
+    outputs = ["result"],
+)
+
+build(cfg, process)
 ```
 
 ```python
@@ -221,17 +281,17 @@ def my_table_ready(ctx):
 
 ```python
 # pipeline.star
-pipeline = DAG(
-    "my_pipeline",
-    schedule="0 * * * *",
-    preconditions=["preconditions.my_table_ready"]
+cfg = config(
+    name           = "my_pipeline",
+    schedule       = "0 * * * *",
+    preconditions  = ["preconditions.my_table_ready"],
 )
 
 # Explicitly none: a conscious decision, not an oversight
-pipeline = DAG(
-    "my_pipeline",
-    schedule="0 * * * *",
-    preconditions=none()
+cfg = config(
+    name           = "my_pipeline",
+    schedule       = "0 * * * *",
+    preconditions  = none(),
 )
 ```
 
@@ -272,21 +332,19 @@ from tinydag.testing import compile
 
 def test_pipeline_structure():
     dag = compile("pipeline.star")
-    
+
     # Topology
     assert dag.depends_on("clean", "extract")
     assert not dag.depends_on("extract", "clean")  # not the other way around
-    assert len(dag.tasks) == 2  # no accidental extra tasks
-    
-    # Task references point where we expect
-    assert dag.task("extract").callable == "mymodule.extract"
-    assert dag.task("clean").callable == "mymodule.clean"
-    
+    assert len(dag.nodes) == 2  # no accidental extra tasks
+
+    # Operator types and config
+    assert dag.node("extract").operator_type == "python"
+    assert dag.node("clean").operator_type == "python"
+
     # Scheduling intent
     assert dag.schedule == "0 * * * *"
-    assert dag.task("extract").timeout == 300
-
-
+    assert dag.node("extract").timeout_secs == 300
 ```
 
 Pipeline-level tests are a capability but not a requirement. The compiler does
@@ -339,6 +397,7 @@ The canonical example:
 ```python
 # Instead of: cmd = "process --partition={{ max_partition('events') }}"
 
+cfg          = config(name="my-pipeline")
 max_partition = python_operator("max-partition",
     script  = "tasks/max_partition.py",
     outputs = ["partition"],
@@ -349,6 +408,8 @@ process = bash_operator("process",
     inputs     = ["partition"],
     depends_on = max_partition,
 )
+
+build(cfg, process)
 ```
 
 `max_partition.py` calls the metastore once, emits the value as an output.
