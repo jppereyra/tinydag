@@ -320,7 +320,7 @@ pub fn compile(
         .map_err(|e| anyhow!("{e}"))?;
 
     let globals = {
-        let mut builder = GlobalsBuilder::new().with(dag_compiler_globals);
+        let mut builder = GlobalsBuilder::standard().with(dag_compiler_globals);
         for reg in crate::operators::all_operator_globals() {
             builder = builder.with(reg);
         }
