@@ -156,9 +156,10 @@ fn validate_inner(dag: &DagDef) -> Result<Vec<NodeId>, Vec<ValidationError>> {
     }
 
     // --- Fan-in output collision check ---
-    // For each node, collect declared outputs from all predecessors. If two
-    // predecessors declare the same output name, the runner would collide at
-    // runtime — reject it here at compile time instead.
+    // If two predecessors of a node declare the same output name and the node
+    // consumes it as an input, the runner can't tell which value to pass —
+    // reject it here at compile time instead. Names the node doesn't consume
+    // are never forwarded, so they can't collide.
     let node_map: HashMap<&str, &crate::dag::Node> =
         dag.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     let mut predecessors: HashMap<&str, Vec<&str>> =
@@ -177,6 +178,9 @@ fn validate_inner(dag: &DagDef) -> Result<Vec<NodeId>, Vec<ValidationError>> {
         let mut seen: HashMap<&str, &str> = HashMap::new();
         for &pred_id in preds {
             for output_name in node_map[pred_id].outputs.as_slice() {
+                if !node.inputs.contains(output_name) {
+                    continue;
+                }
                 if let Some(&first) = seen.get(output_name.as_str()) {
                     errors.push(ValidationError::FanInOutputConflict {
                         node_id: node.id.clone(),

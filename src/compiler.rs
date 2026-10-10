@@ -4,7 +4,7 @@
 //! Runs structural + validation checks at compile time and computes a
 //! deterministic version hash on the resulting artifact.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::path::Path;
 
@@ -248,6 +248,8 @@ fn collect_graph<'v>(terminals: Vec<Value<'v>>) -> anyhow::Result<(Vec<Node>, Ve
     let mut seen: HashMap<String, Value<'v>> = HashMap::new();
     let mut nodes: Vec<Node> = Vec::new();
     let mut edges: Vec<Edge> = Vec::new();
+    // `depends_on=[a, a]` names the same dependency twice; keep one edge.
+    let mut seen_edges: HashSet<(String, String)> = HashSet::new();
     let mut queue: VecDeque<(Value<'v>, Option<String>)> = VecDeque::new();
 
     for t in terminals {
@@ -257,7 +259,9 @@ fn collect_graph<'v>(terminals: Vec<Value<'v>>) -> anyhow::Result<(Vec<Node>, Ve
     while let Some((v, child_id)) = queue.pop_front() {
         let n = downcast_task_node(v)?;
 
-        if let Some(cid) = child_id {
+        if let Some(cid) = child_id
+            && seen_edges.insert((n.task_id.clone(), cid.clone()))
+        {
             edges.push(Edge {
                 from: n.task_id.clone(),
                 to: cid,
@@ -634,5 +638,29 @@ b = bash_operator("b", cmd="echo b", inputs=["missing"], outputs=[], depends_on=
 build(cfg, b)
 "#;
         assert!(compile("test.star", src, None).is_err());
+    }
+
+    #[test]
+    fn fan_in_of_same_output_name_compiles_when_not_consumed() {
+        // Homogeneous branches all declare "rows"; the join consumes none of them.
+        let src = r#"
+cfg = config(name="regional")
+regions = [bash_operator("load-" + r, cmd="true", inputs=[], outputs=["rows"]) for r in ["us", "eu"]]
+done = bash_operator("done", cmd="true", inputs=[], outputs=[], depends_on=regions)
+build(cfg, done)
+"#;
+        compile("test.star", src, None).unwrap();
+    }
+
+    #[test]
+    fn repeated_dependency_yields_one_edge() {
+        let src = r#"
+cfg = config(name="d")
+a = bash_operator("a", cmd="true", inputs=[], outputs=["x"])
+b = bash_operator("b", cmd="true", inputs=["x"], outputs=[], depends_on=[a, a])
+build(cfg, b)
+"#;
+        let dag = compile("test.star", src, None).unwrap();
+        assert_eq!(dag.edges().len(), 1);
     }
 }
