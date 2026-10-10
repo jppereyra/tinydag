@@ -14,6 +14,7 @@ use crate::executor::{DispatchPayload, Executor, ExecutorError, FailureKind, Tas
 pub(crate) enum MockBehavior {
     Succeed(HashMap<String, Value>),
     Fail { code: i32 },
+    Panic,
 }
 
 /// An in-memory [`Executor`] that records every dispatch and answers from a
@@ -60,6 +61,7 @@ impl Executor for MockExecutor {
                 outputs,
                 exit_code: Some(0),
             }),
+            MockBehavior::Panic => panic!("mock executor panicked dispatching '{node_id}'"),
             MockBehavior::Fail { code } => Err(ExecutorError::TaskFailed {
                 node_id,
                 kind: FailureKind::TaskFailed,

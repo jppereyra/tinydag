@@ -11,6 +11,7 @@ use std::time::Instant;
 use opentelemetry::{KeyValue, global};
 use serde_json::Value;
 use thiserror::Error;
+use tokio::task::JoinSet;
 
 use crate::dag::{DagDef, NodeId, Trigger};
 use crate::executor::{DispatchPayload, Executor, ExecutorError, RunContext, TaskOutcome};
@@ -46,6 +47,9 @@ pub enum RunError {
         #[source]
         source: ExecutorError,
     },
+
+    #[error("task '{node_id}' panicked during dispatch: {message}")]
+    TaskPanicked { node_id: NodeId, message: String },
 
     #[error(
         "cannot dispatch '{node_id}': predecessor outputs contain duplicate output name '{output_name}'"
@@ -117,10 +121,10 @@ async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunE
     let mut deps_left: Vec<u32> = plan.in_degree().to_vec();
     let mut ready: Vec<u32> = plan.roots().to_vec();
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<(u32, Result<TaskOutcome, ExecutorError>)>(
-        dag.nodes.len().max(1),
-    );
-    let mut in_flight: usize = 0;
+    // In-flight dispatches. Joining them (rather than having each send its
+    // result on a channel) means a dispatch that panics is still observed.
+    let mut tasks: JoinSet<(u32, Result<TaskOutcome, ExecutorError>)> = JoinSet::new();
+    let mut task_node: HashMap<tokio::task::Id, u32> = HashMap::new();
     let mut task_outcomes: HashMap<NodeId, TaskOutcome> = HashMap::new();
     let mut succeeded: Vec<NodeId> = Vec::new();
     // Outputs of completed nodes, by node index, used to resolve inputs.
@@ -151,9 +155,7 @@ async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunE
                         continue;
                     }
                     if inputs.contains_key(output_name) {
-                        for _ in 0..in_flight {
-                            let _ = rx.recv().await;
-                        }
+                        while tasks.join_next().await.is_some() {}
                         return Err(RunError::DuplicateOutput {
                             node_id: node.id.clone(),
                             output_name: output_name.clone(),
@@ -166,7 +168,6 @@ async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunE
             let payload = DispatchPayload::from_node(node, ctx.clone(), inputs, dag.params.clone());
 
             let executor = Arc::clone(&config.executor);
-            let tx2 = tx.clone();
 
             tracing::info!(
                 run.id  = %run_id,
@@ -175,21 +176,28 @@ async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunE
                 "dispatching task"
             );
 
-            tokio::task::spawn(async move {
-                let result = executor.dispatch(payload).await;
-                let _ = tx2.send((ix, result)).await;
-            });
-
-            in_flight += 1;
-        }
-
-        if in_flight == 0 {
-            break;
+            let handle = tasks.spawn(async move { (ix, executor.dispatch(payload).await) });
+            task_node.insert(handle.id(), ix);
         }
 
         // Wait for the next task to complete.
-        let (ix, result) = rx.recv().await.expect("runner channel closed unexpectedly");
-        in_flight -= 1;
+        let Some(joined) = tasks.join_next_with_id().await else {
+            break;
+        };
+        let (ix, result) = match joined {
+            Ok((id, done)) => {
+                task_node.remove(&id);
+                done
+            }
+            Err(e) => {
+                let ix = task_node[&e.id()];
+                while tasks.join_next().await.is_some() {}
+                return Err(RunError::TaskPanicked {
+                    node_id: plan.node(ix).id.clone(),
+                    message: panic_message(e),
+                });
+            }
+        };
         let node_id = &plan.node(ix).id;
 
         match result {
@@ -203,9 +211,7 @@ async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunE
                 tasks_failed_counter.add(1, &[]);
 
                 // Drain remaining in-flight completions before returning.
-                for _ in 0..in_flight {
-                    let _ = rx.recv().await;
-                }
+                while tasks.join_next().await.is_some() {}
 
                 return Err(RunError::TaskFailed {
                     node_id: node_id.clone(),
@@ -264,6 +270,19 @@ fn trigger_type_str(trigger: &Trigger) -> &'static str {
         Trigger::Cron { .. } => "cron",
         Trigger::Event { .. } => "event",
         Trigger::PipelineCompletion { .. } => "pipeline_completion",
+    }
+}
+
+/// The panic payload of a failed task, as text. Tasks are never aborted here,
+/// so a join error is always a panic.
+fn panic_message(e: tokio::task::JoinError) -> String {
+    match e.try_into_panic() {
+        Ok(payload) => payload
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "non-string panic payload".to_string()),
+        Err(e) => e.to_string(),
     }
 }
 
@@ -422,6 +441,28 @@ build(cfg, b)
                 if node_id == "a"
         ));
         assert_eq!(executor.dispatch_order(), ["a"]);
+    }
+
+    #[tokio::test]
+    async fn a_panicking_dispatch_fails_the_run() {
+        let dag = compile_dag(
+            r#"
+cfg = config(name="panics")
+a = bash_operator("a", cmd="true", inputs=[], outputs=[])
+build(cfg, a)
+"#,
+        );
+        let executor = Arc::new(MockExecutor::new().with("a", MockBehavior::Panic));
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run(RunConfig { dag, executor }),
+        )
+        .await
+        .expect("a panicking dispatch must not hang the run");
+        assert!(
+            matches!(&result, Err(RunError::TaskPanicked { node_id, .. }) if node_id == "a"),
+            "unexpected result: {result:?}"
+        );
     }
 
     #[tokio::test]

@@ -196,7 +196,7 @@ pub async fn run_batch(
             Err(e) => {
                 summary.run_failed += 1;
                 let error = match e {
-                    RunError::TaskFailed { .. } => e.to_string(),
+                    RunError::TaskFailed { .. } | RunError::TaskPanicked { .. } => e.to_string(),
                     RunError::DuplicateOutput {
                         node_id,
                         output_name,
