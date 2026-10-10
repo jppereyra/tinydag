@@ -133,18 +133,18 @@ struct PoolState {
 /// At most `capacity` workers exist at any point in time (idle + active).
 /// Callers block in [`checkout`] if all workers are busy.
 ///
-/// Successful results are memoized by absolute script path: a script that
-/// passed once is never sent to a worker again within the same process
-/// lifetime, regardless of how many pipelines reference it.
+/// Successful results are memoized by script path and content digest: an
+/// unchanged script that passed once is never sent to a worker again,
+/// regardless of how many pipelines reference it; an edited one is.
 pub struct PythonPool {
     state: Mutex<PoolState>,
     /// Notified whenever a worker is checked back in or discarded.
     returned: Condvar,
     python: String,
     capacity: usize,
-    /// Absolute paths of scripts that passed. Failures are not cached so a
-    /// fixed script is re-checked.
-    passed: DashSet<String>,
+    /// (path, content digest) of scripts that passed. Failures are not cached
+    /// so a fixed script is re-checked.
+    passed: DashSet<(String, [u8; 32])>,
 }
 
 impl PythonPool {
@@ -211,7 +211,10 @@ impl PythonPool {
     /// Blocks until a worker is available. Successes are memoized: subsequent
     /// calls with the same path return immediately.
     pub fn validate(&self, script: &str) -> Option<String> {
-        if self.passed.contains(script) {
+        // An unreadable file isn't cached; the worker reports why.
+        let key = crate::operators::script_digest(std::path::Path::new(script))
+            .map(|digest| (script.to_string(), digest));
+        if key.as_ref().is_some_and(|k| self.passed.contains(k)) {
             return None;
         }
 
@@ -221,7 +224,9 @@ impl PythonPool {
         };
         match worker.compile(script) {
             Ok(()) => {
-                self.passed.insert(script.to_string());
+                if let Some(key) = key {
+                    self.passed.insert(key);
+                }
                 self.checkin(worker);
                 None
             }
@@ -318,6 +323,19 @@ mod tests {
         let err = p.validate(&f.path().to_string_lossy()).unwrap();
         assert!(err.contains("failed to start python worker"), "{err}");
         assert_eq!(p.state.lock().unwrap().active, 0);
+    }
+
+    #[test]
+    fn editing_a_script_invalidates_its_cached_pass() {
+        let p = pool(1);
+        let f = write_script("x = 1\n");
+        let path = f.path().to_string_lossy().into_owned();
+        assert!(p.validate(&path).is_none());
+        std::fs::write(f.path(), "def f(\n").unwrap();
+        assert!(
+            p.validate(&path).is_some(),
+            "stale cached pass for an edited script"
+        );
     }
 
     #[test]

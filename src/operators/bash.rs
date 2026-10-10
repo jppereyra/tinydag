@@ -152,8 +152,10 @@ pub fn register_globals(builder: &mut GlobalsBuilder) {
     }
 }
 
-/// Cache for script-file validation results, keyed by absolute path.
-static FILE_CACHE: std::sync::OnceLock<dashmap::DashMap<String, Option<String>>> =
+/// Cache for script-file validation results, keyed by absolute path and a
+/// digest of the contents, so an edited script is checked again.
+type FileKey = (String, [u8; 32]);
+static FILE_CACHE: std::sync::OnceLock<dashmap::DashMap<FileKey, Option<String>>> =
     std::sync::OnceLock::new();
 
 /// Cache for inline-cmd validation results, keyed by command string.
@@ -173,18 +175,29 @@ fn bash_n_cmd(cmd: &str) -> Option<String> {
     if let Err(e) = std::fs::write(tmp.path(), cmd) {
         return Some(format!("failed to write syntax check file: {e}"));
     }
-    let result = bash_n_file(tmp.path());
+    let result = run_bash_n(tmp.path());
     cache.insert(cmd.to_string(), result.clone());
     result
 }
 
 fn bash_n_file(path: &Path) -> Option<String> {
+    // An unreadable file isn't cached; bash -n reports why.
+    let Some(digest) = super::script_digest(path) else {
+        return run_bash_n(path);
+    };
     let cache = FILE_CACHE.get_or_init(dashmap::DashMap::new);
-    let key = path.to_string_lossy();
-    if let Some(cached) = cache.get(key.as_ref()) {
+    let key = (path.to_string_lossy().into_owned(), digest);
+    if let Some(cached) = cache.get(&key) {
         return cached.clone();
     }
-    let result = match std::process::Command::new("bash")
+    let result = run_bash_n(path);
+    cache.insert(key, result.clone());
+    result
+}
+
+/// Runs `bash -n` on a file. Uncached.
+fn run_bash_n(path: &Path) -> Option<String> {
+    match std::process::Command::new("bash")
         .arg("-n")
         .arg(path)
         .stderr(std::process::Stdio::piped())
@@ -193,9 +206,7 @@ fn bash_n_file(path: &Path) -> Option<String> {
         Ok(out) if out.status.success() => None,
         Ok(out) => Some(String::from_utf8_lossy(&out.stderr).trim().to_string()),
         Err(e) => Some(format!("failed to run bash -n: {e}")),
-    };
-    cache.insert(key.into_owned(), result.clone());
-    result
+    }
 }
 
 /// Entry point for the `tinydag-op-bash` binary.
@@ -375,6 +386,22 @@ mod tests {
             script: Some(file.path().to_string_lossy().into_owned()),
         };
         assert!(cfg.validate().is_some());
+    }
+
+    #[test]
+    fn editing_a_script_invalidates_its_cached_validation() {
+        let file = tempfile::Builder::new().suffix(".sh").tempfile().unwrap();
+        let cfg = BashOperator {
+            cmd: None,
+            script: Some(file.path().to_string_lossy().into_owned()),
+        };
+        std::fs::write(file.path(), "echo ok\n").unwrap();
+        assert!(cfg.validate().is_none());
+        std::fs::write(file.path(), "if then done\n").unwrap();
+        assert!(
+            cfg.validate().is_some(),
+            "stale cached result for an edited script"
+        );
     }
 
     // -----------------------------------------------------------------------

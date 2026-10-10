@@ -12,6 +12,16 @@ use starlark::values::{
     Trace, Value, ValueLike,
 };
 
+/// SHA-256 of a script file's contents, or `None` if it can't be read.
+/// Validation caches key on this alongside the path, so an edited script is
+/// re-checked instead of reusing a stale result.
+pub(crate) fn script_digest(path: &Path) -> Option<[u8; 32]> {
+    use sha2::Digest as _;
+    std::fs::read(path)
+        .ok()
+        .map(|bytes| sha2::Sha256::digest(bytes).into())
+}
+
 pub mod bash;
 pub mod python;
 mod runtime;
