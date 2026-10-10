@@ -30,7 +30,7 @@ cd tinydag
 tinydag add examples/diamond-etl.star --run-now
 ```
 
-See [examples/README.md](examples/README.md) for a full walkthrough of the example pipeline.
+The header comments in [examples/diamond-etl.star](examples/diamond-etl.star) walk through what each task does.
 
 ### Building from source
 

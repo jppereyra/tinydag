@@ -9,8 +9,11 @@
 - [ ] `NodeId`, `dag_id`, `pipeline_id`, `run_id`, `version_hash`
       are all plain `String`. You can pass a `run_id` where a `dag_id` is expected and the
       compiler won't catch it.
-- [ ] `compute_version_hash` hashes node IDs, edges,
+- [x] `compute_version_hash` hashes node IDs, edges,
       and params but not the `TaskRef` content (cmd strings, script paths).
+- [ ] `compute_version_hash` hashes absolute script paths, so the same pipeline
+      compiled from two checkouts gets two hashes. Fixed by project-relative
+      `{rel_path, sha256}` script identity (scheduler plan, D2).
 - [ ] `dispatch`, `run`, and `validate` all call `global::meter(...).f64_histogram(...)`
       on every invocation. OTel deduplicates internally but we're still doing string allocations and map lookups on every task.
 - [ ] `compile_source` takes `base_dir: Option<&Path>` which lets callers silently skip

@@ -1,5 +1,11 @@
 ### Task Definition Language
 
+> **Status:** this chapter mixes what exists with what is planned. Not
+> implemented yet: pipeline libraries (`load()`, `.tdg`, `//` paths,
+> `tinydag.toml`), callable-style Python tasks (the Python operator runs a
+> script), late-binding inputs and resolvers, and preconditions. Everything
+> else describes current behaviour.
+
 **Starlark is the user-facing DSL.**
 
 The architecture is a compilation pipeline:
