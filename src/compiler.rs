@@ -64,13 +64,20 @@ impl<'v> StarlarkValue<'v> for PipelineConfig {}
 
 #[derive(Debug, ProvidesStaticType, NoSerialize, Allocative)]
 struct BuiltDag {
+    /// Wrapped in `Mutex<Option<…>>` so `compile()` can `take()` the
+    /// `DagDef` out without cloning, even though Starlark only hands us a
+    /// shared `&BuiltDag` reference via `downcast_ref`.
+    /// `Mutex` satisfies the `Send + Sync` bound that Starlark's heap requires for allocated values.
     #[allocative(skip)]
-    dag_def: DagDef,
+    dag_def: std::sync::Mutex<Option<DagDef>>,
 }
 
 impl fmt::Display for BuiltDag {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "<BuiltDag {}>", self.dag_def.dag_id)
+        match self.dag_def.lock().unwrap().as_ref() {
+            Some(d) => write!(f, "<BuiltDag {}>", d.dag_id),
+            None => write!(f, "<BuiltDag (consumed)>"),
+        }
     }
 }
 
@@ -347,7 +354,7 @@ fn dag_compiler_globals(builder: &mut GlobalsBuilder) {
             .map_or(Trigger::Manual, |s| Trigger::Cron { schedule: s });
 
         Ok(BuiltDag {
-            dag_def: DagDef {
+            dag_def: std::sync::Mutex::new(Some(DagDef {
                 version: 1,
                 dag_id: config.dag_id.clone(),
                 pipeline_id: config.pipeline_id.clone(),
@@ -359,7 +366,7 @@ fn dag_compiler_globals(builder: &mut GlobalsBuilder) {
                 edges,
                 metadata: HashMap::new(),
                 params: config.params.clone(),
-            },
+            })),
         })
     }
 }
@@ -406,7 +413,12 @@ pub fn compile(
                 )
             }
         })?;
-        built.dag_def.clone()
+        built
+            .dag_def
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or_else(|| anyhow!("build() result was already consumed (internal error)"))?
     }; // borrow of return_val ends here
 
     // Resolve pass: canonicalize script paths before validation.
