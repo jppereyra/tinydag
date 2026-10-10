@@ -83,6 +83,9 @@ pub enum ExecutorError {
         stderr: String,
     },
 
+    #[error("node '{node_id}': operator exited without reporting a result ({status})")]
+    OperatorExited { node_id: NodeId, status: String },
+
     #[error("node '{node_id}': task timed out after {timeout_secs}s")]
     TaskTimedOut { node_id: NodeId, timeout_secs: u64 },
 
@@ -313,6 +316,24 @@ async fn terminate(child: &mut tokio::process::Child) {
     let _ = child.wait().await;
 }
 
+/// A result the operator reported before exiting, if any. Reports are acked
+/// only once queued, so an operator that reported and then exited has its
+/// result waiting here even if its exit was noticed first.
+fn queued_terminal_event(
+    events: &mut tokio::sync::mpsc::Receiver<crate::control_server::ControlEvent>,
+) -> Option<crate::control_server::ControlEvent> {
+    use crate::control_server::ControlEvent;
+    while let Ok(event) = events.try_recv() {
+        if matches!(
+            event,
+            ControlEvent::Succeeded { .. } | ControlEvent::Failed { .. }
+        ) {
+            return Some(event);
+        }
+    }
+    None
+}
+
 impl LocalExecutor {
     async fn spawn_operator(
         &self,
@@ -364,7 +385,21 @@ impl LocalExecutor {
                 None => heartbeat_timeout,
             };
 
-            match tokio::time::timeout(wait_dur, event_rx.recv()).await {
+            let event = tokio::select! {
+                biased;
+                event = tokio::time::timeout(wait_dur, event_rx.recv()) => event,
+                status = child.wait() => match queued_terminal_event(&mut event_rx) {
+                    Some(event) => Ok(Some(event)),
+                    None => {
+                        return Err(ExecutorError::OperatorExited {
+                            node_id: payload.node_id.clone(),
+                            status: status.map_or_else(|e| e.to_string(), |s| s.to_string()),
+                        });
+                    }
+                },
+            };
+
+            match event {
                 Ok(Some(ControlEvent::Started)) => {
                     tracing::debug!(node.id = %payload.node_id, "operator reported started");
                 }
@@ -675,6 +710,22 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+
+    #[tokio::test]
+    async fn operator_crash_is_reported_promptly() {
+        // The task's parent is the operator; kill it without letting it report.
+        let ex = bash_executor().await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            ex.dispatch(bash_payload("crash", "kill -9 $PPID; sleep 30", None)),
+        )
+        .await
+        .expect("a crashed operator must not wait out the heartbeat timeout");
+        assert!(
+            matches!(result, Err(ExecutorError::OperatorExited { .. })),
+            "unexpected result: {result:?}"
+        );
     }
 
     #[tokio::test]
