@@ -127,12 +127,52 @@ pub trait Executor: Send + Sync + 'static {
 // LocalExecutor
 // ---------------------------------------------------------------------------
 
+/// Upper bound on file descriptors one running task holds in this process
+/// (stdin pipe + gRPC connection, rounded up for headroom).
+const FDS_PER_TASK: usize = 4;
+
+/// File descriptors kept free for everything else (control server listener,
+/// telemetry exporters, pipeline and script files read during compilation).
+const RESERVED_FDS: usize = 64;
+
+/// Concurrency cap used when the open-file limit can't be read.
+const FALLBACK_MAX_CONCURRENT_TASKS: usize = 32;
+
 /// Default cap on simultaneously-running operator subprocesses.
 ///
-/// Each subprocess consumes several file descriptors (stdin pipe + gRPC
-/// connection). Without a limit, running many pipelines in parallel can exhaust
-/// the OS open-file limit.
-const DEFAULT_MAX_CONCURRENT_TASKS: usize = 32;
+/// The cap exists only to keep running tasks from exhausting the open-file
+/// limit, so it is derived from that limit. `TINYDAG_MAX_CONCURRENT_TASKS`
+/// overrides it.
+pub fn default_max_concurrent_tasks() -> usize {
+    if let Some(n) = std::env::var("TINYDAG_MAX_CONCURRENT_TASKS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+    {
+        return n;
+    }
+    open_file_soft_limit().map_or(FALLBACK_MAX_CONCURRENT_TASKS, max_tasks_for_fd_limit)
+}
+
+fn max_tasks_for_fd_limit(fd_limit: usize) -> usize {
+    (fd_limit.saturating_sub(RESERVED_FDS) / FDS_PER_TASK).max(1)
+}
+
+/// The process's current soft `RLIMIT_NOFILE`, if it can be read.
+pub fn open_file_soft_limit() -> Option<usize> {
+    #[cfg(unix)]
+    {
+        let mut rl = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `rl` is a valid, writable `rlimit` that outlives the call.
+        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) } == 0 {
+            return Some(usize::try_from(rl.rlim_cur).unwrap_or(usize::MAX));
+        }
+    }
+    None
+}
 
 /// Runs tasks by spawning operator binaries as child processes on the local machine.
 ///
@@ -158,8 +198,17 @@ impl LocalExecutor {
             heartbeat_timeout_secs: 90,
             control_server,
             op_binaries: HashMap::new(),
-            dispatch_semaphore: Arc::new(tokio::sync::Semaphore::new(DEFAULT_MAX_CONCURRENT_TASKS)),
+            dispatch_semaphore: Arc::new(tokio::sync::Semaphore::new(
+                default_max_concurrent_tasks(),
+            )),
         }
+    }
+
+    /// Override how many operator subprocesses may run at once (minimum 1).
+    /// Defaults to [`default_max_concurrent_tasks`].
+    pub fn with_max_concurrent_tasks(mut self, n: usize) -> Self {
+        self.dispatch_semaphore = Arc::new(tokio::sync::Semaphore::new(n.max(1)));
+        self
     }
 
     /// Override the binary path for an operator type (e.g. `"bash"`).
@@ -183,7 +232,6 @@ impl Executor for LocalExecutor {
         )
     )]
     async fn dispatch(&self, payload: DispatchPayload) -> Result<TaskOutcome, ExecutorError> {
-        let start = Instant::now();
         let operator = payload.task_ref.type_name();
 
         let op_upper = operator.to_ascii_uppercase();
@@ -198,13 +246,34 @@ impl Executor for LocalExecutor {
                 operator_upper: op_upper,
             })?;
 
+        let queued = Instant::now();
+        let _permit = self
+            .dispatch_semaphore
+            .acquire()
+            .await
+            .expect("semaphore closed");
+        global::meter("tinydag")
+            .f64_histogram("tinydag.task.queue_wait")
+            .with_unit("s")
+            .with_description("Time a task waited for a free operator slot before spawning")
+            .build()
+            .record(
+                queued.elapsed().as_secs_f64(),
+                &[
+                    KeyValue::new("dag.id", payload.ctx.dag_id.clone()),
+                    KeyValue::new("node.id", payload.node_id.clone()),
+                    KeyValue::new("operator.type", operator),
+                ],
+            );
+
+        let start = Instant::now();
         let result = self.spawn_operator(&binary, &payload).await;
 
         global::meter("tinydag")
             .f64_histogram("tinydag.task.duration")
             .with_unit("s")
             .with_description(
-                "Duration of a single task dispatch including operator subprocess lifetime",
+                "Duration of a single task's operator subprocess, excluding queue wait",
             )
             .build()
             .record(
@@ -227,11 +296,6 @@ impl LocalExecutor {
         binary: &str,
         payload: &DispatchPayload,
     ) -> Result<TaskOutcome, ExecutorError> {
-        let _permit = self
-            .dispatch_semaphore
-            .acquire()
-            .await
-            .expect("semaphore closed");
         use crate::control_server::ControlEvent;
 
         let stdin_json =
@@ -415,6 +479,31 @@ mod tests {
             DispatchPayload::from_node(&node, test_run_context(), HashMap::new(), HashMap::new());
         payload.timeout_secs = timeout;
         payload
+    }
+
+    #[test]
+    fn concurrency_cap_scales_with_fd_limit() {
+        assert_eq!(max_tasks_for_fd_limit(256), 48);
+        assert_eq!(max_tasks_for_fd_limit(1024), 240);
+        // Never zero, even when the limit is below the reserve.
+        assert_eq!(max_tasks_for_fd_limit(10), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrency_cap_serializes_tasks() {
+        let ex = Arc::new(bash_executor().await.with_max_concurrent_tasks(1));
+        let start = Instant::now();
+        let a = tokio::spawn({
+            let ex = Arc::clone(&ex);
+            async move { ex.dispatch(bash_payload("a", "sleep 0.3", None)).await }
+        });
+        let b = tokio::spawn({
+            let ex = Arc::clone(&ex);
+            async move { ex.dispatch(bash_payload("b", "sleep 0.3", None)).await }
+        });
+        a.await.unwrap().unwrap();
+        b.await.unwrap().unwrap();
+        assert!(start.elapsed() >= Duration::from_millis(600));
     }
 
     #[tokio::test]

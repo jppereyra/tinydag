@@ -7,6 +7,34 @@ use tinydag::compiler::CompileError;
 use tinydag::executor::LocalExecutor;
 use tinydag::scheduler::Scheduler;
 
+/// Raises the soft open-file limit to the hard limit, as servers commonly do.
+/// The default soft limit (often 1024 on Linux, 256 on macOS) is far below
+/// what running many pipelines at once needs. Failure leaves the limit as is.
+fn raise_open_file_limit() {
+    #[cfg(unix)]
+    {
+        let mut rl = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `rl` is a valid, writable `rlimit` that outlives the call.
+        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) } != 0 {
+            return;
+        }
+        // macOS rejects a soft limit above OPEN_MAX, even when the hard limit
+        // is unlimited.
+        #[cfg(target_os = "macos")]
+        let target = rl.rlim_max.min(libc::OPEN_MAX as libc::rlim_t);
+        #[cfg(not(target_os = "macos"))]
+        let target = rl.rlim_max;
+        if target > rl.rlim_cur {
+            rl.rlim_cur = target;
+            // SAFETY: `rl` is a valid `rlimit`; the soft limit doesn't exceed the hard limit.
+            unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &rl) };
+        }
+    }
+}
+
 /// Discover `tinydag-op-*` binaries that live alongside the current executable.
 ///
 /// Returns `(OPERATOR_UPPERCASE, binary_path)` pairs.  Any operator whose
@@ -170,6 +198,8 @@ async fn cmd_add(args: &[String]) -> i32 {
         }
     };
 
+    // Before LocalExecutor::new(), which sizes its task cap from this limit.
+    raise_open_file_limit();
     let mut executor = LocalExecutor::new().await;
     for (op, path) in discover_op_binaries() {
         executor = executor.with_op_binary(&op, path);
