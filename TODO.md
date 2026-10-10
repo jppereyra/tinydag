@@ -33,7 +33,7 @@
 - [x] Replace `SYNTAX_CHECK_SEQ` `AtomicU64` counters in tests with `tempfile::NamedTempFile`.
 - [ ] Structured error output in CLI: errors should be human-readable and
       machine-parseable
-- [ ] `tinydag add` exit codes: 0 success, 1 compile/validation error, 2 task failed,
+- [x] `tinydag add` exit codes: 0 success, 1 compile/validation error, 2 task failed,
       3 internal error
 ---
 

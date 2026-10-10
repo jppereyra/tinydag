@@ -115,10 +115,11 @@ tinydag compile <pipeline.star> [--output <path>]
 Compiles a Starlark pipeline, runs validation, and writes the DAG artifact to disk as JSON. Default output path: `<pipeline>.dag.json`. This is useful for debugging purposes.
 
 ```
-tinydag add <pipeline.star> [--run-now]
+tinydag add <pipeline.star> [<pipeline.star> ...] [--file <list>] [--run-now]
 ```
-Compiles, validates, and registers the pipeline with the scheduler.
-With `--run-now`, an immediate run is triggered and the result is printed on completion.
+Compiles, validates, and registers one or more pipelines with the scheduler, compiling them in parallel. `--file` reads one path per line (blank lines and `#` comments are skipped). With `--run-now`, every registered pipeline runs immediately and each result is printed on completion.
+
+Exit codes reflect the most severe outcome: `0` success, `1` compile or validation error, `2` a task failed or timed out, `3` internal error (tinydag couldn't run a task).
 
 ---
 

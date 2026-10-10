@@ -106,14 +106,20 @@ impl AddEvent {
 #[derive(Default)]
 pub struct BatchSummary {
     pub compile_failed: usize,
-    pub run_failed: usize,
+    /// Runs that failed because a task failed or timed out.
+    pub task_failed: usize,
+    /// Runs that failed because tinydag couldn't run a task.
+    pub internal_failed: usize,
 }
 
 impl BatchSummary {
-    /// 3 if any run failed, else 1 if any pipeline failed to compile, else 0.
+    /// The most severe outcome: 3 internal error, 2 task failed,
+    /// 1 compile or validation error, 0 success.
     pub fn exit_code(&self) -> i32 {
-        if self.run_failed > 0 {
+        if self.internal_failed > 0 {
             3
+        } else if self.task_failed > 0 {
+            2
         } else if self.compile_failed > 0 {
             1
         } else {
@@ -210,7 +216,11 @@ pub async fn run_batch(
                 task_count: outcome.succeeded.len(),
             }),
             Err(e) => {
-                summary.run_failed += 1;
+                if is_internal(&e) {
+                    summary.internal_failed += 1;
+                } else {
+                    summary.task_failed += 1;
+                }
                 let error = match e {
                     RunError::TaskFailed { .. } | RunError::TaskPanicked { .. } => e.to_string(),
                     RunError::DuplicateOutput {
@@ -226,6 +236,20 @@ pub async fn run_batch(
     }
 
     summary
+}
+
+/// Whether a run failed because tinydag couldn't run a task (spawn, payload
+/// delivery, missing operator, panic, or a state validation should have
+/// prevented) rather than because a task itself failed.
+fn is_internal(e: &RunError) -> bool {
+    use tinydag::executor::ExecutorError as E;
+    match e {
+        RunError::TaskFailed { source, .. } => matches!(
+            source,
+            E::SpawnFailed { .. } | E::StdinFailed { .. } | E::OperatorBinaryNotFound { .. }
+        ),
+        RunError::TaskPanicked { .. } | RunError::DuplicateOutput { .. } => true,
+    }
 }
 
 /// Reads and compiles one pipeline file, flattening errors to messages.
@@ -333,13 +357,44 @@ build(cfg, a)
     }
 
     #[test]
-    fn exit_code_prefers_run_failures() {
-        let s = |compile_failed, run_failed| BatchSummary {
+    fn exit_code_follows_the_most_severe_failure() {
+        let s = |compile_failed, task_failed, internal_failed| BatchSummary {
             compile_failed,
-            run_failed,
+            task_failed,
+            internal_failed,
         };
-        assert_eq!(s(0, 0).exit_code(), 0);
-        assert_eq!(s(2, 0).exit_code(), 1);
-        assert_eq!(s(2, 1).exit_code(), 3);
+        assert_eq!(s(0, 0, 0).exit_code(), 0);
+        assert_eq!(s(2, 0, 0).exit_code(), 1);
+        assert_eq!(s(2, 1, 0).exit_code(), 2);
+        assert_eq!(s(2, 1, 1).exit_code(), 3);
+    }
+
+    #[test]
+    fn run_failures_split_into_task_and_internal() {
+        use tinydag::executor::{ExecutorError, FailureKind};
+        let failed = |source| RunError::TaskFailed {
+            node_id: "n".into(),
+            source,
+        };
+
+        assert!(!is_internal(&failed(ExecutorError::TaskFailed {
+            node_id: "n".into(),
+            kind: FailureKind::TaskFailed,
+            code: 1,
+            message: String::new(),
+        })));
+        assert!(!is_internal(&failed(ExecutorError::TaskTimedOut {
+            node_id: "n".into(),
+            timeout_secs: 1,
+        })));
+        assert!(is_internal(&failed(ExecutorError::SpawnFailed {
+            node_id: "n".into(),
+            binary: "op".into(),
+            source: std::io::Error::other("missing"),
+        })));
+        assert!(is_internal(&RunError::TaskPanicked {
+            node_id: "n".into(),
+            message: String::new(),
+        }));
     }
 }
