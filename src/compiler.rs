@@ -373,7 +373,11 @@ pub fn compile(
     source: &str,
     base_dir: Option<&Path>,
 ) -> Result<DagDef, CompileError> {
-    let ast = AstModule::parse(filename, source.to_owned(), &Dialect::Standard)
+    let dialect = Dialect {
+        enable_f_strings: true,
+        ..Dialect::Standard
+    };
+    let ast = AstModule::parse(filename, source.to_owned(), &dialect)
         .map_err(|e| rewrite_eval_error(anyhow!("{e}")))?;
 
     let globals = {
@@ -542,6 +546,21 @@ build(cfg, n)
         let dag = compile("test.star", src, None).unwrap();
         assert!(!dag.version_hash.is_empty());
         assert_ne!(dag.version_hash, "placeholder");
+    }
+
+    #[test]
+    fn compile_f_strings_in_task_ids() {
+        let src = r#"
+cfg = config(name="d")
+def regional(region):
+    return bash_operator(f"extract-{region}", cmd=f"echo {region}", inputs=[], outputs=[])
+regions = [regional(r) for r in ["us", "eu"]]
+build(cfg, bash_operator("done", cmd="echo done", inputs=[], outputs=[], depends_on=regions))
+"#;
+        let dag = compile("test.star", src, None).unwrap();
+        let mut ids: Vec<&str> = dag.nodes().iter().map(|n| n.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["done", "extract-eu", "extract-us"]);
     }
 
     #[test]
