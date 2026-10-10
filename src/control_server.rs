@@ -7,6 +7,7 @@
 //! returned until the event is accepted into the channel.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
 
@@ -35,6 +36,17 @@ pub enum ControlEvent {
         message: String,
         exit_code: i32,
     },
+}
+
+impl ControlEvent {
+    fn kind(&self) -> &'static str {
+        match self {
+            ControlEvent::Started => "started",
+            ControlEvent::Heartbeat => "heartbeat",
+            ControlEvent::Succeeded { .. } => "succeeded",
+            ControlEvent::Failed { .. } => "failed",
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -68,6 +80,7 @@ impl Drop for TaskGuard {
 #[derive(Clone)]
 struct GrpcService {
     senders: Senders,
+    unknown_task_events: Arc<AtomicU64>,
 }
 
 impl GrpcService {
@@ -77,8 +90,21 @@ impl GrpcService {
             .senders
             .get(&(run_id.to_string(), task_id.to_string()))
             .map(|r| r.clone());
-        if let Some(tx) = tx {
-            let _ = tx.send(event).await;
+        match tx {
+            Some(tx) => {
+                let _ = tx.send(event).await;
+            }
+            // Usually a late report from an operator whose dispatch already
+            // ended (timed out or cancelled).
+            None => {
+                self.unknown_task_events.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    run.id = %run_id,
+                    task.id = %task_id,
+                    event = event.kind(),
+                    "dropping control event for a task that is not running"
+                );
+            }
         }
     }
 }
@@ -143,13 +169,16 @@ impl OperatorControl for GrpcService {
 pub struct ControlServer {
     endpoint: String,
     senders: Senders,
+    unknown_task_events: Arc<AtomicU64>,
 }
 
 impl ControlServer {
     pub async fn start() -> std::io::Result<Self> {
         let senders: Senders = Arc::new(DashMap::new());
+        let unknown_task_events = Arc::new(AtomicU64::new(0));
         let svc = GrpcService {
             senders: Arc::clone(&senders),
+            unknown_task_events: Arc::clone(&unknown_task_events),
         };
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -166,7 +195,13 @@ impl ControlServer {
         Ok(ControlServer {
             endpoint: format!("http://127.0.0.1:{}", addr.port()),
             senders,
+            unknown_task_events,
         })
+    }
+
+    /// Control events received for tasks that weren't registered (and were dropped).
+    pub fn unknown_task_events(&self) -> u64 {
+        self.unknown_task_events.load(Ordering::Relaxed)
     }
 
     /// The HTTP/2 endpoint that operator binaries should connect to.
@@ -191,5 +226,49 @@ impl ControlServer {
             task_id,
         };
         (rx, guard)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::proto::operator_control_client::OperatorControlClient;
+    use super::*;
+
+    fn started(run_id: &str, task_id: &str) -> StartedEvent {
+        StartedEvent {
+            run_id: run_id.to_string(),
+            task_id: task_id.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn events_reach_the_registered_task() {
+        let server = ControlServer::start().await.unwrap();
+        let (mut rx, _guard) = server.register("run".into(), "task".into());
+        let mut client = OperatorControlClient::connect(server.endpoint().to_string())
+            .await
+            .unwrap();
+
+        client.report_started(started("run", "task")).await.unwrap();
+        assert!(matches!(rx.recv().await, Some(ControlEvent::Started)));
+        assert_eq!(server.unknown_task_events(), 0);
+    }
+
+    #[tokio::test]
+    async fn events_for_unknown_tasks_are_counted() {
+        let server = ControlServer::start().await.unwrap();
+        let mut client = OperatorControlClient::connect(server.endpoint().to_string())
+            .await
+            .unwrap();
+
+        client
+            .report_started(started("run", "nobody"))
+            .await
+            .unwrap();
+        assert_eq!(server.unknown_task_events(), 1);
     }
 }
