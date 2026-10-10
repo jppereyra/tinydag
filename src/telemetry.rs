@@ -35,7 +35,10 @@ impl Providers {
 // ---------------------------------------------------------------------------
 
 /// Initialize tracing and OTel.
-pub fn init() -> Providers {
+///
+/// Pass `suppress_console = true` when a TUI owns the terminal becasue the fmt
+/// layer writes to stderr and corrupts the display in that case.
+pub fn init(suppress_console: bool) -> Providers {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
@@ -48,10 +51,12 @@ pub fn init() -> Providers {
         opentelemetry::global::set_tracer_provider(tracer_provider.clone());
         opentelemetry::global::set_meter_provider(meter_provider.clone());
 
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(tracing_subscriber::fmt::layer())
-            .init();
+        let registry = tracing_subscriber::registry().with(filter);
+        if suppress_console {
+            registry.init();
+        } else {
+            registry.with(tracing_subscriber::fmt::layer()).init();
+        }
 
         return Providers {
             tracer_provider,
@@ -99,11 +104,12 @@ pub fn init() -> Providers {
     let tracer = tracer_provider.tracer("tinydag");
     let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(tracing_subscriber::fmt::layer())
-        .with(otel_layer)
-        .init();
+    let registry = tracing_subscriber::registry().with(filter).with(otel_layer);
+    if suppress_console {
+        registry.init();
+    } else {
+        registry.with(tracing_subscriber::fmt::layer()).init();
+    }
 
     Providers {
         tracer_provider,

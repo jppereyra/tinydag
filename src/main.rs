@@ -1,5 +1,7 @@
 mod batch;
+mod pipeline_ui;
 
+use std::io::IsTerminal as _;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -63,7 +65,10 @@ fn discover_op_binaries() -> Vec<(String, String)> {
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let providers = tinydag::telemetry::init();
+    // The TUI owns the terminal, so console logging would corrupt it.
+    let suppress_console =
+        args.get(1).is_some_and(|s| s == "add") && std::io::stdout().is_terminal();
+    let providers = tinydag::telemetry::init(suppress_console);
 
     let exit_code = match args.get(1).map(String::as_str) {
         Some("compile") => cmd_compile(&args),
@@ -175,6 +180,10 @@ async fn cmd_add(args: &[String]) -> i32 {
         executor = executor.with_op_binary(&op, path);
     }
     let scheduler = Scheduler::new(Arc::new(executor));
+
+    if std::io::stdout().is_terminal() {
+        return pipeline_ui::run_add(add, &scheduler).await;
+    }
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let paths = add.paths.clone();

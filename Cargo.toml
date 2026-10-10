@@ -40,6 +40,7 @@ tokio-stream = { version = "0.1", features = ["net"] }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "metrics"] }
 opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "metrics"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+ratatui            = "0.29"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
