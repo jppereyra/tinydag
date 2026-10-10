@@ -76,7 +76,10 @@ pub struct Edge {
 /// Constructed exclusively via [`crate::compiler::compile`]. Fields are pub(crate) so
 /// internal crate code can read them directly; external consumers use the
 /// public getters below.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+///
+/// Deserializing does not re-run validation or recompute `version_hash`; only
+/// load JSON that this crate produced.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DagDef {
     /// Schema version for forward-compatibility checks.
     pub(crate) version: u32,
@@ -335,6 +338,26 @@ mod tests {
             let back: Trigger = serde_json::from_str(&json).unwrap();
             assert_eq!(trigger, back);
         }
+    }
+
+    #[test]
+    fn compiled_dag_json_roundtrip_is_lossless() {
+        let dag = crate::compiler::compile(
+            "test.star",
+            r#"
+cfg = config(name="rt", schedule="0 6 * * *", params={"env": "prod", "model": {"lr": 0.1}})
+a = bash_operator("a", cmd="true", inputs=[], outputs=["x"], timeout_secs=30)
+b = bash_operator("b", cmd="true", inputs=["x"], outputs=[], depends_on=a, max_attempts=2)
+build(cfg, b)
+"#,
+            None,
+        )
+        .unwrap();
+
+        let json = serde_json::to_string(&dag).unwrap();
+        let back: DagDef = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, dag);
+        assert_eq!(back.version_hash(), dag.version_hash());
     }
 
     #[test]
