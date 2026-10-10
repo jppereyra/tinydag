@@ -15,6 +15,7 @@ use thiserror::Error;
 use crate::dag::{DagDef, NodeId, Trigger};
 use crate::executor::{DispatchPayload, Executor, ExecutorError, RunContext, TaskOutcome};
 use crate::operators::Operator;
+use crate::plan::Plan;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -22,7 +23,7 @@ use crate::operators::Operator;
 
 /// Input to a DAG run.
 pub struct RunConfig {
-    pub dag: DagDef,
+    pub dag: Arc<DagDef>,
     pub executor: Arc<dyn Executor>,
 }
 
@@ -102,7 +103,8 @@ pub async fn run(config: RunConfig) -> Result<RunOutcome, RunError> {
 }
 
 async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunError> {
-    let dag = &config.dag;
+    let plan = Plan::new(config.dag);
+    let dag = plan.dag();
 
     let ctx = RunContext {
         run_id: run_id.clone(),
@@ -114,34 +116,18 @@ async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunE
         trigger_type: trigger_type_str(&dag.trigger).to_string(),
     };
 
-    let mut in_degree: HashMap<&str, usize> =
-        dag.nodes.iter().map(|n| (n.id.as_str(), 0)).collect();
-    let mut successors: HashMap<&str, Vec<&str>> =
-        dag.nodes.iter().map(|n| (n.id.as_str(), vec![])).collect();
+    // Remaining unfinished predecessors per node; a node is ready at zero.
+    let mut deps_left: Vec<u32> = plan.in_degree().to_vec();
+    let mut ready: Vec<u32> = plan.roots().to_vec();
 
-    for edge in &dag.edges {
-        *in_degree.get_mut(edge.to.as_str()).unwrap() += 1;
-        successors
-            .get_mut(edge.from.as_str())
-            .unwrap()
-            .push(edge.to.as_str());
-    }
-
-    // Seed with nodes that have no dependencies.
-    let mut ready: Vec<&str> = in_degree
-        .iter()
-        .filter(|&(_, &d)| d == 0)
-        .map(|(id, _)| *id)
-        .collect();
-
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<(NodeId, Result<TaskOutcome, ExecutorError>)>(
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<(u32, Result<TaskOutcome, ExecutorError>)>(
         dag.nodes.len().max(1),
     );
     let mut in_flight: usize = 0;
     let mut task_outcomes: HashMap<NodeId, TaskOutcome> = HashMap::new();
     let mut succeeded: Vec<NodeId> = Vec::new();
-    // Accumulated outputs from all completed nodes, used to resolve inputs.
-    let mut outputs: HashMap<NodeId, HashMap<String, Value>> = HashMap::new();
+    // Outputs of completed nodes, by node index, used to resolve inputs.
+    let mut outputs: Vec<Option<HashMap<String, Value>>> = vec![None; dag.nodes.len()];
 
     let tasks_succeeded_counter = global::meter("tinydag")
         .u64_counter("tinydag.run.tasks_succeeded")
@@ -155,48 +141,47 @@ async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunE
 
     loop {
         // Dispatch all currently-ready nodes.
-        for node_id in ready.drain(..) {
-            let node = dag.nodes.iter().find(|n| n.id == node_id).unwrap().clone();
+        for ix in ready.drain(..) {
+            let node = plan.node(ix);
 
             // Gather inputs: forward only outputs that the node declared as inputs.
             let mut inputs: HashMap<String, Value> = HashMap::new();
-            for edge in dag.edges.iter().filter(|e| e.to == node_id) {
-                for (output_name, value) in
-                    outputs.get(edge.from.as_str()).cloned().unwrap_or_default()
-                {
-                    if !node.inputs.iter().any(|s| s == &output_name) {
+            for &pred in plan.predecessors(ix) {
+                let Some(pred_outputs) = &outputs[pred as usize] else {
+                    continue;
+                };
+                for (output_name, value) in pred_outputs {
+                    if !node.inputs.iter().any(|s| s == output_name) {
                         continue;
                     }
-                    if inputs.contains_key(&output_name) {
+                    if inputs.contains_key(output_name) {
                         for _ in 0..in_flight {
                             let _ = rx.recv().await;
                         }
                         return Err(RunError::DuplicateOutput {
-                            node_id: node_id.to_string(),
-                            output_name,
+                            node_id: node.id.clone(),
+                            output_name: output_name.clone(),
                         });
                     }
-                    inputs.insert(output_name, value);
+                    inputs.insert(output_name.clone(), value.clone());
                 }
             }
 
-            let payload =
-                DispatchPayload::from_node(&node, ctx.clone(), inputs, dag.params.clone());
+            let payload = DispatchPayload::from_node(node, ctx.clone(), inputs, dag.params.clone());
 
             let executor = Arc::clone(&config.executor);
             let tx2 = tx.clone();
-            let owned_id = node_id.to_string();
 
             tracing::info!(
                 run.id  = %run_id,
-                node.id = %node_id,
+                node.id = %node.id,
                 operator.type = %&node.task_ref.type_name(),
                 "dispatching task"
             );
 
             tokio::task::spawn(async move {
                 let result = executor.dispatch(payload).await;
-                let _ = tx2.send((owned_id, result)).await;
+                let _ = tx2.send((ix, result)).await;
             });
 
             in_flight += 1;
@@ -207,8 +192,9 @@ async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunE
         }
 
         // Wait for the next task to complete.
-        let (node_id, result) = rx.recv().await.expect("runner channel closed unexpectedly");
+        let (ix, result) = rx.recv().await.expect("runner channel closed unexpectedly");
         in_flight -= 1;
+        let node_id = &plan.node(ix).id;
 
         match result {
             Err(error) => {
@@ -226,7 +212,7 @@ async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunE
                 }
 
                 return Err(RunError::TaskFailed {
-                    node_id,
+                    node_id: node_id.clone(),
                     source: error,
                 });
             }
@@ -248,19 +234,15 @@ async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunE
                     );
                 }
 
-                outputs.insert(node_id.clone(), outcome.outputs.clone());
+                outputs[ix as usize] = Some(outcome.outputs.clone());
                 succeeded.push(node_id.clone());
                 task_outcomes.insert(node_id.clone(), outcome);
 
-                // Unlock successors whose in-degree drops to zero.
-                let succs: Vec<&str> = successors
-                    .get(node_id.as_str())
-                    .cloned()
-                    .unwrap_or_default();
-                for succ in succs {
-                    let deg = in_degree.get_mut(succ).unwrap();
-                    *deg -= 1;
-                    if *deg == 0 {
+                // Unlock successors whose last predecessor just finished.
+                for &succ in plan.successors(ix) {
+                    let left = &mut deps_left[succ as usize];
+                    *left -= 1;
+                    if *left == 0 {
                         ready.push(succ);
                     }
                 }
@@ -302,6 +284,7 @@ mod tests {
     use super::*;
     use crate::dag::DagDef;
     use crate::executor::LocalExecutor;
+    use crate::testing::{MockBehavior, MockExecutor};
 
     async fn bash_executor() -> Arc<dyn Executor> {
         let test_bin = std::env::current_exe().expect("can't locate test binary");
@@ -318,8 +301,92 @@ mod tests {
         )
     }
 
-    fn compile_dag(src: &str) -> DagDef {
-        crate::compiler::compile("test.star", src, None).unwrap()
+    fn compile_dag(src: &str) -> Arc<DagDef> {
+        Arc::new(crate::compiler::compile("test.star", src, None).unwrap())
+    }
+
+    #[tokio::test]
+    async fn roots_dispatch_in_declaration_order() {
+        let dag = compile_dag(
+            r#"
+cfg = config(name="fan-in")
+roots = [bash_operator("r%d" % i, cmd="true", inputs=[], outputs=[]) for i in range(8)]
+done = bash_operator("done", cmd="true", inputs=[], outputs=[], depends_on=roots)
+build(cfg, done)
+"#,
+        );
+        // Ready nodes used to come out of a HashMap, so this order varied run to run.
+        for _ in 0..20 {
+            let executor = Arc::new(MockExecutor::new());
+            run(RunConfig {
+                dag: Arc::clone(&dag),
+                executor: executor.clone(),
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                executor.dispatch_order(),
+                ["r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "done"]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn failure_stops_dispatch_of_successors() {
+        let dag = compile_dag(
+            r#"
+cfg = config(name="fails")
+a = bash_operator("a", cmd="true", inputs=[], outputs=[])
+b = bash_operator("b", cmd="true", inputs=[], outputs=[], depends_on=a)
+build(cfg, b)
+"#,
+        );
+        let executor = Arc::new(MockExecutor::new().with("a", MockBehavior::Fail { code: 3 }));
+        let err = run(RunConfig {
+            dag,
+            executor: executor.clone(),
+        })
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            RunError::TaskFailed { ref node_id, source: ExecutorError::TaskFailed { code: 3, .. } }
+                if node_id == "a"
+        ));
+        assert_eq!(executor.dispatch_order(), ["a"]);
+    }
+
+    #[tokio::test]
+    async fn only_declared_inputs_reach_a_task() {
+        let dag = compile_dag(
+            r#"
+cfg = config(name="inputs")
+a = bash_operator("a", cmd="true", inputs=[], outputs=["x", "y"])
+b = bash_operator("b", cmd="true", inputs=["x"], outputs=[], depends_on=a)
+build(cfg, b)
+"#,
+        );
+        let a_outputs = HashMap::from([
+            ("x".to_string(), serde_json::json!(1)),
+            ("y".to_string(), serde_json::json!(2)),
+        ]);
+        let executor = Arc::new(MockExecutor::new().with("a", MockBehavior::Succeed(a_outputs)));
+        run(RunConfig {
+            dag,
+            executor: executor.clone(),
+        })
+        .await
+        .unwrap();
+
+        let b = executor
+            .dispatched()
+            .into_iter()
+            .find(|p| p.node_id == "b")
+            .unwrap();
+        assert_eq!(
+            b.inputs,
+            HashMap::from([("x".to_string(), serde_json::json!(1))])
+        );
     }
 
     #[tokio::test]

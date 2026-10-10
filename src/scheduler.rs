@@ -12,7 +12,7 @@ use crate::executor::Executor;
 use crate::runner::{RunConfig, RunError, RunOutcome, run};
 
 pub struct Scheduler {
-    dags: DashMap<String, DagDef>,
+    dags: DashMap<String, Arc<DagDef>>,
     executor: Arc<dyn Executor>,
 }
 
@@ -31,7 +31,7 @@ impl Scheduler {
     }
 
     pub fn register(&self, dag: DagDef) {
-        self.dags.insert(dag.dag_id().to_string(), dag);
+        self.dags.insert(dag.dag_id().to_string(), Arc::new(dag));
     }
 
     /// Spawn a run task for `dag_id` and return a handle the caller can await.
