@@ -81,10 +81,10 @@ pub async fn run(config: RunConfig) -> Result<RunOutcome, RunError> {
 
     let result = run_inner(run_id, config).await;
 
-    let (status, dag_id) = match &result {
-        Ok(o) => ("success", o.dag_id.clone()),
-        Err(_) => ("failure", "<unknown>".to_string()),
-    };
+    let status = if result.is_ok() { "success" } else { "failure" };
+
+    // Metric attributes must have bounded cardinality: per-DAG and per-node
+    // detail belongs on the spans, not here.
 
     global::meter("tinydag")
         .f64_histogram("tinydag.run.duration")
@@ -93,10 +93,7 @@ pub async fn run(config: RunConfig) -> Result<RunOutcome, RunError> {
         .build()
         .record(
             start.elapsed().as_secs_f64(),
-            &[
-                KeyValue::new("dag.id", dag_id),
-                KeyValue::new("result", status),
-            ],
+            &[KeyValue::new("result", status)],
         );
 
     result
@@ -137,7 +134,6 @@ async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunE
         .u64_counter("tinydag.run.tasks_failed")
         .with_description("Number of tasks that failed in a DAG run")
         .build();
-    let run_attrs = [KeyValue::new("dag.id", dag.dag_id.clone())];
 
     loop {
         // Dispatch all currently-ready nodes.
@@ -204,7 +200,7 @@ async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunE
                     error   = %error,
                     "task failed"
                 );
-                tasks_failed_counter.add(1, &run_attrs);
+                tasks_failed_counter.add(1, &[]);
 
                 // Drain remaining in-flight completions before returning.
                 for _ in 0..in_flight {
@@ -223,7 +219,7 @@ async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunE
                     node.id = %node_id,
                     "task succeeded"
                 );
-                tasks_succeeded_counter.add(1, &run_attrs);
+                tasks_succeeded_counter.add(1, &[]);
 
                 for (output_name, output_value) in &outcome.outputs {
                     tracing::info!(
@@ -303,6 +299,78 @@ mod tests {
 
     fn compile_dag(src: &str) -> Arc<DagDef> {
         Arc::new(crate::compiler::compile("test.star", src, None).unwrap())
+    }
+
+    /// Attribute keys on every data point in `data`.
+    fn attribute_keys<T>(
+        data: &opentelemetry_sdk::metrics::data::MetricData<T>,
+        keys: &mut std::collections::BTreeSet<String>,
+    ) {
+        use opentelemetry_sdk::metrics::data::MetricData;
+        let mut add = |kvs: &mut dyn Iterator<Item = &KeyValue>| {
+            keys.extend(kvs.map(|kv| kv.key.to_string()));
+        };
+        match data {
+            MetricData::Gauge(g) => g.data_points().for_each(|p| add(&mut p.attributes())),
+            MetricData::Sum(s) => s.data_points().for_each(|p| add(&mut p.attributes())),
+            MetricData::Histogram(h) => h.data_points().for_each(|p| add(&mut p.attributes())),
+            MetricData::ExponentialHistogram(h) => {
+                h.data_points().for_each(|p| add(&mut p.attributes()))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn metrics_carry_no_per_dag_or_per_node_attributes() {
+        use opentelemetry_sdk::metrics::data::AggregatedMetrics;
+        use opentelemetry_sdk::metrics::{
+            InMemoryMetricExporter, PeriodicReader, SdkMeterProvider,
+        };
+
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build())
+            .build();
+        global::set_meter_provider(provider.clone());
+
+        let dag = compile_dag(
+            r#"
+cfg = config(name="metrics", pipeline_id="p")
+a = bash_operator("a", cmd="true", inputs=[], outputs=[])
+b = bash_operator("b", cmd="true", inputs=[], outputs=[], depends_on=a)
+build(cfg, b)
+"#,
+        );
+        run(RunConfig {
+            dag,
+            executor: bash_executor().await,
+        })
+        .await
+        .unwrap();
+        provider.force_flush().unwrap();
+
+        // Each distinct value of these is its own time series; at thousands of
+        // DAGs the SDK's cardinality limit silently folds them into overflow.
+        let mut keys = std::collections::BTreeSet::new();
+        for rm in exporter.get_finished_metrics().unwrap() {
+            for metric in rm.scope_metrics().flat_map(|sm| sm.metrics()) {
+                match metric.data() {
+                    AggregatedMetrics::F64(d) => attribute_keys(d, &mut keys),
+                    AggregatedMetrics::U64(d) => attribute_keys(d, &mut keys),
+                    AggregatedMetrics::I64(d) => attribute_keys(d, &mut keys),
+                }
+            }
+        }
+        assert!(
+            keys.contains("result"),
+            "expected metrics, got keys {keys:?}"
+        );
+        for unbounded in ["dag.id", "node.id", "dag.pipeline_id"] {
+            assert!(
+                !keys.contains(unbounded),
+                "metric attribute '{unbounded}' in {keys:?}"
+            );
+        }
     }
 
     #[tokio::test]

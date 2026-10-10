@@ -95,11 +95,10 @@ pub fn validate(dag: &DagDef) -> Result<Vec<NodeId>, Vec<ValidationError>> {
         .build()
         .record(
             start.elapsed().as_secs_f64(),
-            &[
-                KeyValue::new("dag.id", dag.dag_id.clone()),
-                KeyValue::new("dag.pipeline_id", dag.pipeline_id.clone()),
-                KeyValue::new("result", if result.is_ok() { "success" } else { "failure" }),
-            ],
+            &[KeyValue::new(
+                "result",
+                if result.is_ok() { "success" } else { "failure" },
+            )],
         );
     result
 }

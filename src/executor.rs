@@ -291,11 +291,7 @@ impl Executor for LocalExecutor {
             .build()
             .record(
                 queued.elapsed().as_secs_f64(),
-                &[
-                    KeyValue::new("dag.id", payload.ctx.dag_id.clone()),
-                    KeyValue::new("node.id", payload.node_id.clone()),
-                    KeyValue::new("operator.type", operator),
-                ],
+                &[KeyValue::new("operator.type", operator)],
             );
 
         let start = Instant::now();
@@ -311,8 +307,6 @@ impl Executor for LocalExecutor {
             .record(
                 start.elapsed().as_secs_f64(),
                 &[
-                    KeyValue::new("dag.id", payload.ctx.dag_id.clone()),
-                    KeyValue::new("node.id", payload.node_id.clone()),
                     KeyValue::new("operator.type", operator),
                     KeyValue::new("result", if result.is_ok() { "success" } else { "failure" }),
                 ],
