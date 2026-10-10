@@ -1,8 +1,11 @@
+mod batch;
+
 use std::path::Path;
 use std::sync::Arc;
+
 use tinydag::compiler::CompileError;
 use tinydag::executor::LocalExecutor;
-use tinydag::runner::RunError;
+use tinydag::scheduler::Scheduler;
 
 /// Discover `tinydag-op-*` binaries that live alongside the current executable.
 ///
@@ -59,8 +62,8 @@ fn discover_op_binaries() -> Vec<(String, String)> {
 
 #[tokio::main]
 async fn main() {
-    let providers = tinydag::telemetry::init();
     let args: Vec<String> = std::env::args().collect();
+    let providers = tinydag::telemetry::init();
 
     let exit_code = match args.get(1).map(String::as_str) {
         Some("compile") => cmd_compile(&args),
@@ -73,7 +76,7 @@ async fn main() {
                 "  compile <pipeline.star> [--output <path>]   Compile a Starlark pipeline to a DAG"
             );
             eprintln!(
-                "  add <pipeline.star> [--run-now]              Register a pipeline with the scheduler"
+                "  add <pipeline.star> [<pipeline.star> ...] [--file <list>] [--run-now]\n      Register pipelines with the scheduler"
             );
             1
         }
@@ -86,12 +89,12 @@ async fn main() {
     }
 }
 
-fn print_compile_errors(e: CompileError) {
+fn print_compile_errors(path: &str, e: CompileError) {
     match e {
-        CompileError::Eval(e) => eprintln!("error: {e}"),
+        CompileError::Eval(e) => eprintln!("error in '{path}': {e}"),
         CompileError::Validation(errs) => {
             for e in errs {
-                eprintln!("error: {e}");
+                eprintln!("error in '{path}': {e}");
             }
         }
     }
@@ -152,72 +155,35 @@ fn cmd_compile(args: &[String]) -> i32 {
             0
         }
         Err(e) => {
-            print_compile_errors(e);
+            print_compile_errors(input, e);
             1
         }
     }
 }
 
 async fn cmd_add(args: &[String]) -> i32 {
-    let Some(path) = args.get(2) else {
-        eprintln!("usage: tinydag add <pipeline.star> [--run-now]");
-        return 1;
-    };
-
-    let run_now = args.iter().any(|a| a == "--run-now");
-
-    let star_path = Path::new(path);
-    let source = match std::fs::read_to_string(star_path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: cannot read '{path}': {e}");
-            return 1;
-        }
-    };
-    let dag = match tinydag::compiler::compile(path, &source, star_path.parent()) {
-        Ok(d) => d,
-        Err(e) => {
-            print_compile_errors(e);
+    let add = match batch::parse_add_args(args) {
+        Ok(a) => a,
+        Err(msg) => {
+            eprintln!("{msg}");
             return 1;
         }
     };
 
-    let dag_id = dag.dag_id().to_string();
-    let node_count = dag.nodes().len();
     let mut executor = LocalExecutor::new().await;
     for (op, path) in discover_op_binaries() {
         executor = executor.with_op_binary(&op, path);
     }
-    let executor = Arc::new(executor);
-    let scheduler = tinydag::scheduler::Scheduler::new(executor);
-    scheduler.register(dag);
+    let scheduler = Scheduler::new(Arc::new(executor));
 
-    if !run_now {
-        println!("registered {dag_id} ({node_count} nodes)");
-        return 0;
-    }
-
-    match scheduler.trigger(&dag_id).unwrap().await.unwrap() {
-        Ok(outcome) => {
-            println!(
-                "run {} succeeded ({} tasks)",
-                outcome.run_id,
-                outcome.succeeded.len()
-            );
-            0
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let paths = add.paths.clone();
+    let printer = tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            batch::print_event(&paths, &event);
         }
-        Err(RunError::TaskFailed { node_id, source }) => {
-            eprintln!("task '{node_id}' failed: {source}");
-            3
-        }
-        Err(RunError::DuplicateOutput {
-            node_id,
-            output_name,
-        }) => {
-            eprintln!(
-                "error: predecessors of '{node_id}' produce duplicate output name '{output_name}'"
-            );
-            3
-        }
-    }
+    });
+    let summary = batch::run_batch(add.paths, add.run_now, &scheduler, tx).await;
+    printer.await.expect("printer task panicked");
+    summary.exit_code()
 }
