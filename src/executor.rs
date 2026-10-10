@@ -339,6 +339,38 @@ async fn terminate(child: &mut tokio::process::Child) {
     let _ = child.wait().await;
 }
 
+/// An operator process that is sent SIGTERM if its dispatch is dropped while
+/// it is still running (e.g. its run was cancelled), so it stops its task.
+/// SIGTERM rather than tokio's `kill_on_drop` (SIGKILL), which would skip the
+/// operator's handler and leave the task running.
+struct TerminateOnDrop(tokio::process::Child);
+
+impl std::ops::Deref for TerminateOnDrop {
+    type Target = tokio::process::Child;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for TerminateOnDrop {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for TerminateOnDrop {
+    fn drop(&mut self) {
+        // try_wait reaps an exited child, so a pid we signal is still ours.
+        #[cfg(unix)]
+        if let Ok(None) = self.0.try_wait()
+            && let Some(pid) = self.0.id()
+        {
+            // SAFETY: plain syscall on a child we spawned and have not reaped.
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        }
+    }
+}
+
 /// A result the operator reported before exiting, if any. Reports are acked
 /// only once queued, so an operator that reported and then exited has its
 /// result waiting here even if its exit was noticed first.
@@ -373,17 +405,19 @@ impl LocalExecutor {
             .control_server
             .register(payload.ctx.run_id.clone(), payload.node_id.clone());
 
-        let mut child = Command::new(binary)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .env("TINYDAG_CONTROL_ENDPOINT", self.control_server.endpoint())
-            .spawn()
-            .map_err(|e| ExecutorError::SpawnFailed {
-                node_id: payload.node_id.clone(),
-                binary: binary.to_string(),
-                source: e,
-            })?;
+        let mut child = TerminateOnDrop(
+            Command::new(binary)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .env("TINYDAG_CONTROL_ENDPOINT", self.control_server.endpoint())
+                .spawn()
+                .map_err(|e| ExecutorError::SpawnFailed {
+                    node_id: payload.node_id.clone(),
+                    binary: binary.to_string(),
+                    source: e,
+                })?,
+        );
 
         {
             let mut stdin = child.stdin.take().unwrap();
@@ -702,21 +736,11 @@ mod tests {
     /// Heartbeat timeout: a task that never reports back is killed once the
     /// heartbeat window expires. We set a very short timeout via the task's
     /// `timeout_secs` field so the test doesn't take 30 s.
-    /// Whether `pid` is a live (non-zombie) process.
-    #[cfg(target_os = "linux")]
-    fn process_alive(pid: i32) -> bool {
-        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-            // Field 3, after the parenthesised command name, is the state.
-            Ok(stat) => stat
-                .rsplit_once(") ")
-                .is_some_and(|(_, rest)| !rest.starts_with('Z')),
-            Err(_) => false,
-        }
-    }
-
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn timeout_kills_the_task_process_group() {
+        use crate::testing::process_alive;
+
         let dir = tempfile::tempdir().unwrap();
         let pidfile = dir.path().join("sleep.pid");
         let cmd = format!("sleep 60 & echo $! > {}; wait", pidfile.display());

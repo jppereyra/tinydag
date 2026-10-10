@@ -155,7 +155,7 @@ async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunE
                         continue;
                     }
                     if inputs.contains_key(output_name) {
-                        while tasks.join_next().await.is_some() {}
+                        tasks.shutdown().await;
                         return Err(RunError::DuplicateOutput {
                             node_id: node.id.clone(),
                             output_name: output_name.clone(),
@@ -191,7 +191,7 @@ async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunE
             }
             Err(e) => {
                 let ix = task_node[&e.id()];
-                while tasks.join_next().await.is_some() {}
+                tasks.shutdown().await;
                 return Err(RunError::TaskPanicked {
                     node_id: plan.node(ix).id.clone(),
                     message: panic_message(e),
@@ -210,8 +210,9 @@ async fn run_inner(run_id: String, config: RunConfig) -> Result<RunOutcome, RunE
                 );
                 tasks_failed_counter.add(1, &[]);
 
-                // Drain remaining in-flight completions before returning.
-                while tasks.join_next().await.is_some() {}
+                // Stop the rest of the run: aborting a dispatch makes the
+                // executor terminate its operator.
+                tasks.shutdown().await;
 
                 return Err(RunError::TaskFailed {
                     node_id: node_id.clone(),
@@ -441,6 +442,53 @@ build(cfg, b)
                 if node_id == "a"
         ));
         assert_eq!(executor.dispatch_order(), ["a"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_failed_task_stops_its_running_siblings() {
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("sleep.pid");
+        let dag = compile_dag(&format!(
+            r#"
+cfg = config(name="siblings")
+slow = bash_operator("slow", cmd="sleep 30 & echo $! > {}; wait", inputs=[], outputs=[])
+bad = bash_operator("bad", cmd="sleep 0.5; exit 1", inputs=[], outputs=[])
+done = bash_operator("done", cmd="true", inputs=[], outputs=[], depends_on=[slow, bad])
+build(cfg, done)
+"#,
+            pidfile.display()
+        ));
+
+        let started = Instant::now();
+        let err = run(RunConfig {
+            dag,
+            executor: bash_executor().await,
+        })
+        .await
+        .unwrap_err();
+        assert!(matches!(err, RunError::TaskFailed { ref node_id, .. } if node_id == "bad"));
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "run waited {:?} for a sibling instead of stopping it",
+            started.elapsed()
+        );
+
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while crate::testing::process_alive(pid) {
+            assert!(
+                Instant::now() < deadline,
+                "sibling's process {pid} outlived the run"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     #[tokio::test]

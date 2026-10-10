@@ -71,3 +71,15 @@ impl Executor for MockExecutor {
         }
     }
 }
+
+/// Whether `pid` is a live (non-zombie) process.
+#[cfg(target_os = "linux")]
+pub(crate) fn process_alive(pid: i32) -> bool {
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        // Field 3, after the parenthesised command name, is the state.
+        Ok(stat) => stat
+            .rsplit_once(") ")
+            .is_some_and(|(_, rest)| !rest.starts_with('Z')),
+        Err(_) => false,
+    }
+}
