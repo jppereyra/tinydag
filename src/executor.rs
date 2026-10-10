@@ -74,13 +74,42 @@ pub struct TaskOutcome {
     pub exit_code: Option<i32>,
 }
 
+/// Why an operator reported failure. Mirrors the protocol's `FailedErrorType`
+/// (except invalid outputs, which surface as [`ExecutorError::OutputParseFailed`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureKind {
+    /// The task's script ran and exited non-zero.
+    TaskFailed,
+    /// The operator couldn't set up the task (spawn or I/O error). May be transient.
+    RuntimeError,
+    /// The operator's own checks failed before it started work.
+    ValidationFailed,
+    /// The dispatch payload was malformed. Retrying won't help.
+    InvalidConfig,
+    Unspecified,
+}
+
+impl From<crate::control_server::proto::FailedErrorType> for FailureKind {
+    fn from(t: crate::control_server::proto::FailedErrorType) -> Self {
+        use crate::control_server::proto::FailedErrorType as T;
+        match t {
+            T::TaskFailed => FailureKind::TaskFailed,
+            T::RuntimeError => FailureKind::RuntimeError,
+            T::ValidationFailed => FailureKind::ValidationFailed,
+            T::InvalidConfig => FailureKind::InvalidConfig,
+            T::Unspecified | T::InvalidOutput => FailureKind::Unspecified,
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ExecutorError {
-    #[error("node '{node_id}': task failed (exit {code}): {stderr}")]
+    #[error("node '{node_id}': task failed (exit {code}): {message}")]
     TaskFailed {
         node_id: NodeId,
+        kind: FailureKind,
         code: i32,
-        stderr: String,
+        message: String,
     },
 
     #[error("node '{node_id}': operator exited without reporting a result ({status})")]
@@ -445,8 +474,9 @@ impl LocalExecutor {
                     }
                     return Err(ExecutorError::TaskFailed {
                         node_id: payload.node_id.clone(),
+                        kind: error_type.into(),
                         code: exit_code,
-                        stderr: String::new(),
+                        message,
                     });
                 }
 
@@ -595,7 +625,14 @@ mod tests {
             .dispatch(bash_payload("node-1", "exit 42", None))
             .await
             .unwrap_err();
-        assert!(matches!(err, ExecutorError::TaskFailed { code: 42, .. }));
+        assert!(
+            matches!(
+                &err,
+                ExecutorError::TaskFailed { kind: FailureKind::TaskFailed, code: 42, message, .. }
+                    if message == "bash exited 42"
+            ),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[tokio::test]

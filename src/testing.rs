@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::dag::NodeId;
-use crate::executor::{DispatchPayload, Executor, ExecutorError, TaskOutcome};
+use crate::executor::{DispatchPayload, Executor, ExecutorError, FailureKind, TaskOutcome};
 
 /// How [`MockExecutor`] answers a dispatch of one node.
 #[derive(Clone, Debug)]
@@ -62,8 +62,9 @@ impl Executor for MockExecutor {
             }),
             MockBehavior::Fail { code } => Err(ExecutorError::TaskFailed {
                 node_id,
+                kind: FailureKind::TaskFailed,
                 code,
-                stderr: String::new(),
+                message: format!("mock failure (exit {code})"),
             }),
         }
     }
