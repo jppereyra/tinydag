@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -126,6 +127,13 @@ pub trait Executor: Send + Sync + 'static {
 // LocalExecutor
 // ---------------------------------------------------------------------------
 
+/// Default cap on simultaneously-running operator subprocesses.
+///
+/// Each subprocess consumes several file descriptors (stdin pipe + gRPC
+/// connection). Without a limit, running many pipelines in parallel can exhaust
+/// the OS open-file limit.
+const DEFAULT_MAX_CONCURRENT_TASKS: usize = 32;
+
 /// Runs tasks by spawning operator binaries as child processes on the local machine.
 ///
 /// The binary for operator type `X` is resolved first from the in-process map
@@ -136,6 +144,7 @@ pub struct LocalExecutor {
     pub heartbeat_timeout_secs: u64,
     control_server: std::sync::Arc<crate::control_server::ControlServer>,
     op_binaries: HashMap<String, String>,
+    dispatch_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl LocalExecutor {
@@ -149,6 +158,7 @@ impl LocalExecutor {
             heartbeat_timeout_secs: 90,
             control_server,
             op_binaries: HashMap::new(),
+            dispatch_semaphore: Arc::new(tokio::sync::Semaphore::new(DEFAULT_MAX_CONCURRENT_TASKS)),
         }
     }
 
@@ -217,12 +227,17 @@ impl LocalExecutor {
         binary: &str,
         payload: &DispatchPayload,
     ) -> Result<TaskOutcome, ExecutorError> {
+        let _permit = self
+            .dispatch_semaphore
+            .acquire()
+            .await
+            .expect("semaphore closed");
         use crate::control_server::ControlEvent;
 
         let stdin_json =
             serde_json::to_string(payload).expect("DispatchPayload serialization should not fail");
 
-        // Register before spawning — guard removes the entry on drop.
+        // Register before spawning
         let (mut event_rx, _task_guard) = self
             .control_server
             .register(payload.ctx.run_id.clone(), payload.node_id.clone());
