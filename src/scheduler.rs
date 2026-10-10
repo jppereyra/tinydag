@@ -17,6 +17,12 @@ pub struct Scheduler {
 }
 
 #[derive(Debug, thiserror::Error)]
+pub enum RegisterError {
+    #[error("DAG '{0}' is already registered with the scheduler")]
+    DuplicateDagId(String),
+}
+
+#[derive(Debug, thiserror::Error)]
 pub enum TriggerError {
     #[error("DAG '{0}' is not registered with the scheduler")]
     UnknownDag(String),
@@ -30,8 +36,15 @@ impl Scheduler {
         }
     }
 
-    pub fn register(&self, dag: DagDef) {
-        self.dags.insert(dag.dag_id().to_string(), Arc::new(dag));
+    /// Registers a DAG under its `dag_id`, which must not already be taken.
+    pub fn register(&self, dag: DagDef) -> Result<(), RegisterError> {
+        match self.dags.entry(dag.dag_id().to_string()) {
+            dashmap::Entry::Occupied(e) => Err(RegisterError::DuplicateDagId(e.key().clone())),
+            dashmap::Entry::Vacant(e) => {
+                e.insert(Arc::new(dag));
+                Ok(())
+            }
+        }
     }
 
     /// Spawn a run task for `dag_id` and return a handle the caller can await.
@@ -92,10 +105,23 @@ a = bash_operator("a", cmd="printf '{\"outputs\":{}}'  ", inputs=[], outputs=[])
 build(cfg, a)
 "#,
         );
-        scheduler.register(dag);
+        scheduler.register(dag).unwrap();
         let handle = scheduler.trigger("test").unwrap();
         let outcome = handle.await.unwrap().unwrap();
         assert_eq!(outcome.succeeded, vec!["a"]);
+    }
+
+    #[tokio::test]
+    async fn registering_a_taken_dag_id_is_an_error() {
+        let scheduler = Scheduler::new(bash_executor().await);
+        let src = r#"
+cfg = config(name="test")
+a = bash_operator("a", cmd="true", inputs=[], outputs=[])
+build(cfg, a)
+"#;
+        scheduler.register(compile_dag(src)).unwrap();
+        let err = scheduler.register(compile_dag(src)).unwrap_err();
+        assert!(matches!(err, RegisterError::DuplicateDagId(ref id) if id == "test"));
     }
 
     #[tokio::test]
@@ -117,7 +143,7 @@ a = bash_operator("a", cmd="exit 1", inputs=[], outputs=[])
 build(cfg, a)
 "#,
         );
-        scheduler.register(dag);
+        scheduler.register(dag).unwrap();
         let handle = scheduler.trigger("test").unwrap();
         let err = handle.await.unwrap().unwrap_err();
         assert!(matches!(err, RunError::TaskFailed { ref node_id, .. } if node_id == "a"));

@@ -3,6 +3,7 @@
 //! Progress is reported as [`AddEvent`]s over a channel so the front end that
 //! displays it (plain text today) is decoupled from the work itself.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -135,6 +136,7 @@ pub async fn run_batch(
         let _ = events.send(ev);
     };
 
+    let names = paths.clone();
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_COMPILES));
     let mut compiles = JoinSet::new();
     for (idx, path) in paths.into_iter().enumerate() {
@@ -151,13 +153,27 @@ pub async fn run_batch(
     }
 
     let mut registered: Vec<(usize, String)> = Vec::new();
+    let mut registered_by: HashMap<String, usize> = HashMap::new();
     while let Some(joined) = compiles.join_next().await {
         let (idx, result) = joined.expect("compile task panicked");
         match result {
             Ok(dag) => {
                 let dag_id = dag.dag_id().to_string();
                 let node_count = dag.nodes().len();
-                scheduler.register(dag);
+                if scheduler.register(dag).is_err() {
+                    let first = registered_by
+                        .get(&dag_id)
+                        .map_or("an earlier pipeline", |&i| names[i].as_str());
+                    summary.compile_failed += 1;
+                    emit(AddEvent::CompileFailed {
+                        idx,
+                        errors: vec![format!(
+                            "dag_id '{dag_id}' is already registered by '{first}'"
+                        )],
+                    });
+                    continue;
+                }
+                registered_by.insert(dag_id.clone(), idx);
                 registered.push((idx, dag_id.clone()));
                 emit(AddEvent::Registered {
                     idx,
@@ -253,6 +269,45 @@ mod tests {
             .chain(rest)
             .map(|s| s.to_string())
             .collect()
+    }
+
+    #[tokio::test]
+    async fn duplicate_dag_id_in_a_batch_is_reported_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = r#"
+cfg = config(name="same")
+a = bash_operator("a", cmd="true", inputs=[], outputs=[])
+build(cfg, a)
+"#;
+        let paths: Vec<String> = ["one.star", "two.star"]
+            .iter()
+            .map(|name| {
+                let p = dir.path().join(name);
+                std::fs::write(&p, src).unwrap();
+                p.to_string_lossy().into_owned()
+            })
+            .collect();
+
+        let scheduler = Scheduler::new(Arc::new(tinydag::executor::LocalExecutor::new().await));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let summary = run_batch(paths.clone(), false, &scheduler, tx).await;
+
+        let mut registered = 0;
+        let mut failures = Vec::new();
+        while let Some(event) = rx.recv().await {
+            match event {
+                AddEvent::Registered { .. } => registered += 1,
+                AddEvent::CompileFailed { errors, .. } => failures.extend(errors),
+                _ => {}
+            }
+        }
+        assert_eq!(registered, 1);
+        assert_eq!(summary.compile_failed, 1);
+        assert_eq!(failures.len(), 1);
+        assert!(
+            failures[0].contains("dag_id 'same' is already registered by"),
+            "{failures:?}"
+        );
     }
 
     #[test]
