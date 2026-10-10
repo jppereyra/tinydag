@@ -33,9 +33,18 @@ pub trait Operator {
 
     /// Returns bytes capturing this operator's runtime content for version hashing.
     /// Called after resolve(), so paths are already absolute.
-    /// For inline commands: the command text. For script files: the file contents.
     fn content_for_hash(&self) -> Vec<u8> {
         Vec::new()
+    }
+
+    /// Feed this operator's config fields directly into a hasher.
+    ///
+    /// Avoids `serde_json::to_string` (which allocates a `String` + runs `format_inner`).
+    /// Override in operator impls that have fields beyond what `content_for_hash` captures.
+    fn hash_into(&self, hasher: &mut impl sha2::Digest) {
+        hasher.update(self.type_name().as_bytes());
+        hasher.update(b"\x00");
+        hasher.update(self.content_for_hash());
     }
 }
 
@@ -74,6 +83,13 @@ impl Operator for TaskRef {
         match self {
             TaskRef::Python(c) => c.content_for_hash(),
             TaskRef::Bash(c) => c.content_for_hash(),
+        }
+    }
+
+    fn hash_into(&self, hasher: &mut impl sha2::Digest) {
+        match self {
+            TaskRef::Python(c) => c.hash_into(hasher),
+            TaskRef::Bash(c) => c.hash_into(hasher),
         }
     }
 }

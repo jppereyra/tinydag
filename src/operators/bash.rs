@@ -88,6 +88,24 @@ impl Operator for BashOperator {
         }
         Vec::new()
     }
+
+    /// Hash directly without going through serde_json serialization.
+    fn hash_into(&self, hasher: &mut impl sha2::Digest) {
+        hasher.update(b"bash\x00");
+        match (&self.cmd, &self.script) {
+            (Some(cmd), None) => {
+                hasher.update(b"cmd\x00");
+                hasher.update(cmd.as_bytes());
+            }
+            (None, Some(script)) => {
+                hasher.update(b"script\x00");
+                hasher.update(script.as_bytes());
+                hasher.update(b"\x00");
+                hasher.update(std::fs::read(script).unwrap_or_default());
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Registers `bash_operator()` as a Starlark global.

@@ -173,39 +173,27 @@ impl DagDef {
         hasher.update(self.pipeline_id.as_bytes());
         hasher.update(b"\x00");
 
-        // Nodes: sort by ID for determinism regardless of insertion order.
-        let mut node_ids: Vec<&str> = self.nodes.iter().map(|n| n.id.as_str()).collect();
-        node_ids.sort_unstable();
-        for id in &node_ids {
-            let node = self.nodes.iter().find(|n| n.id == *id).unwrap();
-            hasher.update(id.as_bytes());
+        let mut nodes: Vec<&Node> = self.nodes.iter().collect();
+        nodes.sort_unstable_by(|a, b| a.id.cmp(&b.id));
+        for node in &nodes {
+            hasher.update(node.id.as_bytes());
             hasher.update(b"\x00");
-            // Operator type + field values (script path, cmd).
-            hasher.update(
-                serde_json::to_string(&node.task_ref)
-                    .unwrap_or_default()
-                    .as_bytes(),
-            );
+            node.task_ref.hash_into(&mut hasher);
             hasher.update(b"\x01");
-            // Operator runtime content: cmd text or script file bytes.
-            hasher.update(node.task_ref.content_for_hash());
-            hasher.update(b"\x00");
-            // Task-level inputs and outputs (sorted for determinism).
-            let mut sorted_inputs = node.inputs.clone();
-            sorted_inputs.sort_unstable();
-            for name in &sorted_inputs {
+            let mut inputs: Vec<&str> = node.inputs.iter().map(String::as_str).collect();
+            inputs.sort_unstable();
+            for name in &inputs {
                 hasher.update(name.as_bytes());
                 hasher.update(b"\x03");
             }
-            let mut sorted_outputs = node.outputs.clone();
-            sorted_outputs.sort_unstable();
-            for name in &sorted_outputs {
+            let mut outputs: Vec<&str> = node.outputs.iter().map(String::as_str).collect();
+            outputs.sort_unstable();
+            for name in &outputs {
                 hasher.update(name.as_bytes());
                 hasher.update(b"\x04");
             }
         }
 
-        // Edges: sort (from, to) pairs.
         let mut edges: Vec<(&str, &str)> = self
             .edges
             .iter()
@@ -219,7 +207,6 @@ impl DagDef {
             hasher.update(b"\x00");
         }
 
-        // Params: sort by key for determinism regardless of insertion order.
         let mut param_keys: Vec<&str> = self.params.keys().map(String::as_str).collect();
         param_keys.sort_unstable();
         for key in &param_keys {
@@ -300,6 +287,31 @@ mod tests {
 
         let mut dag2 = DagDef::new("train");
         dag2.nodes.extend([stub_node("b"), stub_node("a")]);
+
+        assert_eq!(dag1.compute_version_hash(), dag2.compute_version_hash());
+    }
+
+    #[test]
+    fn version_hash_is_stable_for_nested_param_dicts() {
+        // serde_json's Map sorts keys today, so this passes trivially. It guards
+        // against the `preserve_order` feature being enabled (possibly by another
+        // dependency via feature unification), which would make Map keep
+        // insertion order and change the hash.
+        let mut m1 = serde_json::Map::new();
+        m1.insert("lr".into(), serde_json::json!(0.1));
+        m1.insert("batch".into(), serde_json::json!(32));
+
+        let mut m2 = serde_json::Map::new();
+        m2.insert("batch".into(), serde_json::json!(32));
+        m2.insert("lr".into(), serde_json::json!(0.1));
+
+        let mut dag1 = DagDef::new("train");
+        dag1.params
+            .insert("model".into(), serde_json::Value::Object(m1));
+
+        let mut dag2 = DagDef::new("train");
+        dag2.params
+            .insert("model".into(), serde_json::Value::Object(m2));
 
         assert_eq!(dag1.compute_version_hash(), dag2.compute_version_hash());
     }

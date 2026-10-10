@@ -66,6 +66,14 @@ impl Operator for PythonOperator {
         // confirmed the script exists and is readable.
         std::fs::read(&self.script).unwrap_or_default()
     }
+
+    /// Hash directly without going through serde_json serialization.
+    fn hash_into(&self, hasher: &mut impl sha2::Digest) {
+        hasher.update(b"python\x00script\x00");
+        hasher.update(self.script.as_bytes());
+        hasher.update(b"\x00");
+        hasher.update(std::fs::read(&self.script).unwrap_or_default());
+    }
 }
 
 /// Returns a hint for a missing required named parameter specific to python_operator.
