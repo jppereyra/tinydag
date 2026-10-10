@@ -3,6 +3,7 @@ pub mod control_server;
 pub mod dag;
 pub mod executor;
 pub mod operators;
+pub mod python_pool;
 pub mod runner;
 pub mod scheduler;
 pub mod telemetry;

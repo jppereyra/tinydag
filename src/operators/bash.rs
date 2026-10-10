@@ -152,7 +152,20 @@ pub fn register_globals(builder: &mut GlobalsBuilder) {
     }
 }
 
+/// Cache for script-file validation results, keyed by absolute path.
+static FILE_CACHE: std::sync::OnceLock<dashmap::DashMap<String, Option<String>>> =
+    std::sync::OnceLock::new();
+
+/// Cache for inline-cmd validation results, keyed by command string.
+/// Avoids creating+unlinking a tempfile for every repeated inline command.
+static CMD_CACHE: std::sync::OnceLock<dashmap::DashMap<String, Option<String>>> =
+    std::sync::OnceLock::new();
+
 fn bash_n_cmd(cmd: &str) -> Option<String> {
+    let cache = CMD_CACHE.get_or_init(dashmap::DashMap::new);
+    if let Some(cached) = cache.get(cmd) {
+        return cached.clone();
+    }
     let tmp = match tempfile::Builder::new().suffix(".sh").tempfile() {
         Ok(f) => f,
         Err(e) => return Some(format!("failed to create syntax check file: {e}")),
@@ -160,11 +173,18 @@ fn bash_n_cmd(cmd: &str) -> Option<String> {
     if let Err(e) = std::fs::write(tmp.path(), cmd) {
         return Some(format!("failed to write syntax check file: {e}"));
     }
-    bash_n_file(tmp.path())
+    let result = bash_n_file(tmp.path());
+    cache.insert(cmd.to_string(), result.clone());
+    result
 }
 
 fn bash_n_file(path: &Path) -> Option<String> {
-    match std::process::Command::new("bash")
+    let cache = FILE_CACHE.get_or_init(dashmap::DashMap::new);
+    let key = path.to_string_lossy();
+    if let Some(cached) = cache.get(key.as_ref()) {
+        return cached.clone();
+    }
+    let result = match std::process::Command::new("bash")
         .arg("-n")
         .arg(path)
         .stderr(std::process::Stdio::piped())
@@ -173,7 +193,9 @@ fn bash_n_file(path: &Path) -> Option<String> {
         Ok(out) if out.status.success() => None,
         Ok(out) => Some(String::from_utf8_lossy(&out.stderr).trim().to_string()),
         Err(e) => Some(format!("failed to run bash -n: {e}")),
-    }
+    };
+    cache.insert(key.into_owned(), result.clone());
+    result
 }
 
 /// Entry point for the `tinydag-op-bash` binary.

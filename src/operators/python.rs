@@ -38,23 +38,15 @@ impl Operator for PythonOperator {
 
     /// Returns `Some(reason)` if this config fails validation.
     ///
-    /// Runs `$TINYDAG_PYTHON -m py_compile` on the script.
+    /// Sends the script path to the global [`crate::python_pool`] worker pool,
+    /// which reuses persistent Python processes instead of spawning a new
+    /// `python3 -m py_compile` subprocess for every script.
     /// Path must already be absolute (resolve was called first).
     fn validate(&self) -> Option<String> {
         if self.script.trim().is_empty() {
             return Some("python script path is empty".to_string());
         }
-        let python = std::env::var("TINYDAG_PYTHON").unwrap_or_else(|_| "python3".to_string());
-        match std::process::Command::new(&python)
-            .args(["-m", "py_compile"])
-            .arg(Path::new(&self.script))
-            .stderr(std::process::Stdio::piped())
-            .output()
-        {
-            Ok(out) if out.status.success() => None,
-            Ok(out) => Some(String::from_utf8_lossy(&out.stderr).trim().to_string()),
-            Err(e) => Some(format!("failed to run {python} -m py_compile: {e}")),
-        }
+        crate::python_pool::validate_script(&self.script)
     }
 
     fn type_name(&self) -> &'static str {
