@@ -112,11 +112,12 @@ pub fn register_globals(builder: &mut GlobalsBuilder) {
 /// Entry point for the `tinydag-op-python` binary.
 pub fn run() -> ! {
     use std::fs;
-    use std::os::unix::process::CommandExt as _;
     use std::process::{Command, Stdio};
     use std::sync::atomic::Ordering;
 
-    use super::{CHILD_PGID, FailedErrorType, OperatorFailure, read_outputs_file, run_operator};
+    use super::{
+        CHILD_PGID, FailedErrorType, OperatorFailure, isolate_task, read_outputs_file, run_operator,
+    };
 
     run_operator("python", |payload, work_dir| {
         let script = payload["task_ref"]["script"]
@@ -146,18 +147,12 @@ pub fn run() -> ! {
             .stdout(Stdio::inherit())
             .env("TINYDAG_WORK_DIR", work_dir);
 
-        let mut child = unsafe {
-            py.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            })
-            .spawn()
-            .map_err(|e| OperatorFailure {
-                error_type: FailedErrorType::RuntimeError,
-                message: format!("failed to spawn {python}: {e}"),
-                exit_code: 1,
-            })?
-        };
+        isolate_task(&mut py);
+        let mut child = py.spawn().map_err(|e| OperatorFailure {
+            error_type: FailedErrorType::RuntimeError,
+            message: format!("failed to spawn {python}: {e}"),
+            exit_code: 1,
+        })?;
         CHILD_PGID.store(child.id() as i32, Ordering::SeqCst);
         let status = child.wait().map_err(io_err)?;
 

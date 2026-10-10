@@ -44,6 +44,35 @@ extern "C" fn handle_sigterm(_: libc::c_int) {
     unsafe { libc::_exit(128 + libc::SIGTERM) };
 }
 
+/// Puts the task in its own session, so the SIGTERM handler can kill its whole
+/// process group, and on Linux has the kernel SIGKILL it if the operator dies,
+/// so an operator killed with SIGKILL can't leave the task running.
+///
+/// PDEATHSIG fires when the *thread* that spawned the child exits, so spawn
+/// from a thread that lives as long as the operator (the main thread does).
+pub fn isolate_task(cmd: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt as _;
+
+    #[cfg(target_os = "linux")]
+    let operator_pid = std::process::id() as libc::pid_t;
+    // SAFETY: the closure runs between fork and exec and only makes
+    // async-signal-safe syscalls.
+    unsafe {
+        cmd.pre_exec(move || {
+            libc::setsid();
+            #[cfg(target_os = "linux")]
+            {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                // The operator may have died before prctl took effect.
+                if libc::getppid() != operator_pid {
+                    libc::_exit(1);
+                }
+            }
+            Ok(())
+        });
+    }
+}
+
 // ---------------------------------------------------------------------------
 // gRPC session (private)
 // ---------------------------------------------------------------------------

@@ -290,6 +290,29 @@ impl Executor for LocalExecutor {
     }
 }
 
+/// How long a timed-out operator gets between SIGTERM and SIGKILL. SIGTERM
+/// lets it kill its task's process group before exiting.
+const TERMINATE_GRACE: Duration = Duration::from_secs(5);
+
+/// Stops an operator: SIGTERM first, SIGKILL if it hasn't exited within
+/// [`TERMINATE_GRACE`]. SIGKILL alone would skip the operator's handler and
+/// leave the task's processes running.
+async fn terminate(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        // SAFETY: plain syscall on a child we spawned and have not reaped.
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        if tokio::time::timeout(TERMINATE_GRACE, child.wait())
+            .await
+            .is_ok()
+        {
+            return;
+        }
+    }
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+}
+
 impl LocalExecutor {
     async fn spawn_operator(
         &self,
@@ -393,8 +416,7 @@ impl LocalExecutor {
                 }
 
                 Err(_elapsed) => {
-                    let _ = child.start_kill();
-                    let _ = child.wait().await;
+                    terminate(&mut child).await;
                     let timeout_secs = payload.timeout_secs.unwrap_or(self.heartbeat_timeout_secs);
                     return Err(ExecutorError::TaskTimedOut {
                         node_id: payload.node_id.clone(),
@@ -416,8 +438,7 @@ impl LocalExecutor {
             if let Some(t) = payload.timeout_secs
                 && start.elapsed() >= Duration::from_secs(t)
             {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
+                terminate(&mut child).await;
                 return Err(ExecutorError::TaskTimedOut {
                     node_id: payload.node_id.clone(),
                     timeout_secs: t,
@@ -615,6 +636,47 @@ mod tests {
     /// Heartbeat timeout: a task that never reports back is killed once the
     /// heartbeat window expires. We set a very short timeout via the task's
     /// `timeout_secs` field so the test doesn't take 30 s.
+    /// Whether `pid` is a live (non-zombie) process.
+    #[cfg(target_os = "linux")]
+    fn process_alive(pid: i32) -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            // Field 3, after the parenthesised command name, is the state.
+            Ok(stat) => stat
+                .rsplit_once(") ")
+                .is_some_and(|(_, rest)| !rest.starts_with('Z')),
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn timeout_kills_the_task_process_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("sleep.pid");
+        let cmd = format!("sleep 60 & echo $! > {}; wait", pidfile.display());
+
+        let ex = bash_executor().await;
+        let err = ex
+            .dispatch(bash_payload("orphan", &cmd, Some(1)))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ExecutorError::TaskTimedOut { .. }));
+
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while process_alive(pid) {
+            assert!(
+                Instant::now() < deadline,
+                "task process {pid} outlived the timeout"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     #[tokio::test]
     async fn grpc_heartbeat_timeout_kills_stuck_task() {
         let ex = bash_executor().await;

@@ -319,4 +319,6 @@ pub fn param_hint(operator: &str, param: &str) -> Option<&'static str> {
         .and_then(|(_, hint_fn)| hint_fn(param))
 }
 
-pub use runtime::{CHILD_PGID, FailedErrorType, OperatorFailure, read_outputs_file, run_operator};
+pub use runtime::{
+    CHILD_PGID, FailedErrorType, OperatorFailure, isolate_task, read_outputs_file, run_operator,
+};

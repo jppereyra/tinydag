@@ -202,12 +202,13 @@ fn bash_n_file(path: &Path) -> Option<String> {
 pub fn run() -> ! {
     use std::fs;
     use std::os::unix::fs::PermissionsExt as _;
-    use std::os::unix::process::CommandExt as _;
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
     use std::sync::atomic::Ordering;
 
-    use super::{CHILD_PGID, FailedErrorType, OperatorFailure, read_outputs_file, run_operator};
+    use super::{
+        CHILD_PGID, FailedErrorType, OperatorFailure, isolate_task, read_outputs_file, run_operator,
+    };
 
     run_operator("bash", |payload, work_dir| {
         let cmd_val = payload["task_ref"]["cmd"].as_str();
@@ -246,14 +247,8 @@ pub fn run() -> ! {
             .stdout(Stdio::inherit())
             .env("TINYDAG_WORK_DIR", work_dir);
 
-        let mut child = unsafe {
-            bash.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            })
-            .spawn()
-            .map_err(io_err)?
-        };
+        isolate_task(&mut bash);
+        let mut child = bash.spawn().map_err(io_err)?;
         CHILD_PGID.store(child.id() as i32, Ordering::SeqCst);
         let status = child.wait().map_err(io_err)?;
 
