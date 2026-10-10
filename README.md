@@ -61,20 +61,26 @@ cfg = config(
 )
 
 extract = bash_operator("extract",
-    cmd = "printf '{\"outputs\":{\"rows\":1000}}' > tinydag_outputs.json",
+    cmd     = "printf '{\"outputs\":{\"rows\":1000}}' > tinydag_outputs.json",
+    inputs  = [],
+    outputs = ["rows"],
 )
 
 transform = bash_operator("transform",
     cmd        = "echo transforming >&2",
+    inputs     = ["rows"],
+    outputs    = [],
     depends_on = extract,
 )
 
-load = bash_operator("load",
+load_task = bash_operator("load",
     cmd        = "echo loading >&2",
+    inputs     = [],
+    outputs    = [],
     depends_on = transform,
 )
 
-build(cfg, load)
+build(cfg, load_task)
 ```
 
 Operator functions return values that you should pass to `depends_on` directly. `build()` takes the terminal node (or a list of terminal nodes) and walks the dependency graph from there. You can use the full Starlark language to build pipelines programmatically:
@@ -83,13 +89,15 @@ Operator functions return values that you should pass to `depends_on` directly. 
 cfg = config(name="regional-pipeline", team="data-eng")
 
 def regional(region):
-    extract = bash_operator(f"extract-{region}", cmd = f"extract.sh {region}")
-    load    = python_operator(f"load-{region}",   script = "tasks/load.py",
-                              depends_on = extract)
-    return load
+    extract = bash_operator(f"extract-{region}", cmd = f"extract.sh {region}",
+                            inputs = [], outputs = [])
+    load_task = python_operator(f"load-{region}",   script = "tasks/load.py",
+                                inputs = [], outputs = [], depends_on = extract)
+    return load_task
 
 loads = [regional(r) for r in ["us", "eu", "apac"]]
-done  = bash_operator("done", cmd = "echo all regions loaded", depends_on = loads)
+done  = bash_operator("done", cmd = "echo all regions loaded",
+                      inputs = [], outputs = [], depends_on = loads)
 
 build(cfg, done)
 ```

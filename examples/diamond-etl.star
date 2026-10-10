@@ -18,6 +18,8 @@ cfg = config(
 # Simulates I/O with a short sleep, emits {"rows": 42} for downstream tasks.
 extract = bash_operator("extract",
     cmd = "echo extracting >&2 && sleep 0.1 && printf '{\"outputs\":{\"rows\":42}}' > tinydag_outputs.json",
+    inputs  = [],
+    outputs = ["rows"],
 )
 
 # Reads `rows` from tinydag_inputs.json, doubles it, writes {"doubled": 84}.
@@ -31,14 +33,18 @@ transform_a = python_operator("transform-a",
 # Runs in parallel with transform-a. Logs to stderr, produces no outputs.
 transform_b = bash_operator("transform-b",
     cmd        = "echo transforming-b >&2",
+    inputs     = [],
+    outputs    = [],
     depends_on = extract,
 )
 
 # Waits for both transforms. Dumps tinydag_inputs.json to stderr so you can
 # see `doubled` flowing in from transform-a.
-load = bash_operator("load",
+load_task = bash_operator("load",
     cmd        = "echo loading >&2 && cat tinydag_inputs.json >&2",
+    inputs     = ["doubled"],
+    outputs    = [],
     depends_on = [transform_a, transform_b],
 )
 
-build(cfg, load)
+build(cfg, load_task)

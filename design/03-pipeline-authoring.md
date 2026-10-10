@@ -37,9 +37,9 @@ def regional(name, regions=["us", "eu", "apac"]):
     loads = []
     for r in regions:
         extract = bash_operator(f"{name}-extract-{r}", cmd=f"extract.sh {r}")
-        load    = python_operator(f"{name}-load-{r}", script="tasks/load.py",
-                                  depends_on=extract)
-        loads.append(load)
+        load_task = python_operator(f"{name}-load-{r}", script="tasks/load.py",
+                                    depends_on=extract)
+        loads.append(load_task)
     return loads
 ```
 
@@ -73,10 +73,10 @@ extract   = bash_operator("extract",   cmd = "extract.sh")
 transform = python_operator("transform", script = "tasks/transform.py",
                              inputs = ["raw"], outputs = ["processed"],
                              depends_on = extract)
-load      = bash_operator("load",      cmd = "load.sh", depends_on = transform)
+load_task = bash_operator("load",      cmd = "load.sh", depends_on = transform)
 
 # 3. Build call that assembles the graph and closes the pipeline
-build(cfg, load)
+build(cfg, load_task)
 ```
 
 `config()` validates required fields and returns a pipeline configuration value.
@@ -92,9 +92,9 @@ cfg = config(name="regional-etl", team="data-eng")
 
 def regional_pipeline(region):
     extract = bash_operator(f"extract-{region}", cmd = f"extract.sh {region}")
-    load    = python_operator(f"load-{region}",   script = "tasks/load.py",
-                              depends_on = extract)
-    return load
+    load_task = python_operator(f"load-{region}",   script = "tasks/load.py",
+                                depends_on = extract)
+    return load_task
 
 loads = [regional_pipeline(r) for r in ["us", "eu", "apac"]]
 done  = bash_operator("done", cmd = "echo all done", depends_on = loads)
