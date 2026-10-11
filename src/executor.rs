@@ -150,6 +150,9 @@ pub enum ExecutorError {
 ///
 /// Each call to `dispatch` resolves when the task completes (or times out).
 /// Parallelism across tasks is the caller's responsibility.
+// async_trait marks the boxed future it returns `#[must_use]`, which newer
+// clippy flags as redundant.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Executor: Send + Sync + 'static {
     async fn dispatch(&self, payload: DispatchPayload) -> Result<TaskOutcome, ExecutorError>;
