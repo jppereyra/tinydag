@@ -17,4 +17,5 @@ to a formal RFC process.
 6. [Internals](design/06-internals.md) -- the guts
 7. [Roadmap](design/07-roadmap.md) -- how will we make it happen
 8. [Open Questions](design/08-open-questions.md) -- what we need to think more about
+9. [Scheduler Plan](design/09-scheduler-plan.md) -- codebase assessment and the phased scheduler milestone
 
